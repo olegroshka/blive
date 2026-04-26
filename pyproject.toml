@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blive"
+version = "0.1.0"
+description = "Live algorithmic execution engine — sibling to btest"
+readme = "README.md"
+requires-python = "==3.11.*"
+authors = [{ name = "Oleg Roshka" }]
+
+# Runtime dependencies.
+#  - quantdsl-backtest: research/backtesting DSL; engines reused per ADR-010.
+#    Pinned via [tool.uv.sources] to the local sibling working copy at ../btest.
+#  - ib_async: TWS-API wrapper, used only inside adapters/ib/* per ADR-002 + ADR-004.
+dependencies = [
+  "quantdsl-backtest",
+  "ib_async>=2.1,<2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "pytest-mock>=3.12",
+  "hypothesis>=6.100",
+  "mypy>=1.10",
+  "black>=24.0",
+  "isort>=5.13",
+  "import-linter>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/olegroshka/blive"
+Repository = "https://github.com/olegroshka/blive"
+
+# --- Build configuration -----------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blive"]
+
+# --- uv configuration --------------------------------------------------------
+# Pin quantdsl-backtest to the local sibling repo (editable). Per the M0 plan
+# we depend on the local working copy, not a published package or git URL.
+
+[tool.uv.sources]
+quantdsl-backtest = { path = "../btest", editable = true }
+
+# --- pytest configuration ----------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/contracts"]
+asyncio_mode = "auto"
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "manual: tests requiring external setup (e.g. IB Paper) — not in CI",
+]
+
+# --- Linting / formatting ----------------------------------------------------
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+# btest is not strictly typed end-to-end; allow imports without stub errors.
+module = ["quantdsl_backtest.*", "ib_async.*"]
+ignore_missing_imports = true
+
+# --- Import-linter contracts (ADR-004, ADR-008) ------------------------------
+# Enforced by `lint-imports` (CLI from the import-linter package).
+
+[tool.importlinter]
+root_packages = ["blive"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Domain layer is broker-neutral (ADR-004)"
+type = "forbidden"
+source_modules = ["blive.domain"]
+forbidden_modules = [
+  "blive.adapters",
+  "ib_async",
+]
+
+[[tool.importlinter.contracts]]
+# RiskEngine no-bypass placeholder: when blive.execution lands at M3, this
+# contract will forbid blive.strategies / blive.sizing from importing it
+# directly. Stub for now; tightened when those packages exist.
+name = "RiskEngine no-bypass (ADR-008) — placeholder"
+type = "forbidden"
+source_modules = ["blive.domain"]
+forbidden_modules = ["blive.platform_api", "blive.platform_ui"]

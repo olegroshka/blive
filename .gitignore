@@ -1,0 +1,58 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+
+# Test / coverage / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# blive runtime artefacts (artefact cache, run snapshots) — local only
+.blive/
+
+# uv lockfile is committed (uv recommends checking in uv.lock for apps)
+# but cache and per-user files are not
+.uv-cache/
+
+# LaTeX build intermediates (the .tex source and the .pdf are tracked; the
+# auxiliary files regenerate on every build)
+*.aux
+*.log
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
