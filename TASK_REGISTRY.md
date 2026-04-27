@@ -3,8 +3,8 @@ id: TASK_REGISTRY
 title: Task Registry — Phase 1 Plan
 status: DRAFT
 owner: Oleg primary, Claude assist
-last_reviewed: 2026-04-26
-version: 0.1.2
+last_reviewed: 2026-04-27
+version: 0.1.3
 sources:
   - REQUIREMENTS.md §14
   - KB-5 §7
@@ -201,7 +201,7 @@ A quality gate is a checkpoint at the boundary between milestones. The gate must
 |------|----------------|-------|
 | **G0** (M0 entry) | ADR-001..023 stable (✓ ADR-020..023 added 2026-04-26) | **PASSED 2026-04-26** |
 | **G1** (M0 → M1) | DD-1, INV-13 STABLE; PaperBroker round-trip green; import-linter passing | **PASSED 2026-04-26** (see [RETRO-M0](./docs/retros/M0_retrospective.md)) |
-| **G2** (M1 → M2) | btest equity-match within ±1 bps; M1 deliverables complete; operator-side prereqs verified | Oleg |
+| **G2** (M1 → M2) | btest equity-match within ±1 bps; M1 deliverables complete; operator-side prereqs verified | **PARTIAL 2026-04-27** (see [RETRO-M1](./docs/retros/M1_retrospective.md)) — pipeline machinery + 175 tests green; real-data ±1 bps run deferred to operator EODHD CAC.PA + TKAN artefact run |
 | **G3** (M2 → M3) | IB Paper read-mirror passes; throttle + reconnect tests green | Oleg |
 | **G4** (M3 → M4 / Phase 2 entry) | All six M3 exit criteria met; PHASE_2_READINESS audit drafted | Oleg |
 
@@ -214,7 +214,7 @@ Risks specific to Phase 1 (broader risks live in [REQUIREMENTS](./REQUIREMENTS.m
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
 | IB Paper account commissioning takes longer than expected | Medium | M2 slip | Verify account at G2 gate, before M2 starts |
-| EODHD CAC index coverage insufficient | Low | M2 redo | Verify before M2 (G2 gate); fall back to IB-only data for CAC.PA |
+| EODHD CAC index coverage insufficient | Low (verified) | M2 redo | **Verified 2026-04-27** (M1-close lane). EODHD probe ran with operator-supplied key: `CAC.PA` daily EOD (2024-12 sample) returns full OHLC + adjusted_close + volume — primary tradable per [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) covered. `CAC.PA` real-time quote returns delayed-tier data (sufficient for Phase-1 EOD strategy). Open small follow-up for M2: the CAC 40 *index* ticker is not `CAC.INDX` (404 from EODHD); when wiring `EODHDDataSource`, try `PX1.INDX` / `^FCHI`. Index feed is nice-to-have for parity-residual decomposition, not a G2 blocker. |
 | Docker / IBC setup fragile on Windows host | Medium | M2 friction | Plan Linux-host fallback; document discoveries in KB-8 |
 | btest version drift breaks blive imports during Phase 1 | Medium | rebuild | Pin btest minor; CI smoke-imports check (M0 deliverable); coordination policy in [ADR-010](./docs/decisions/DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) |
 | TKAN artefact retrained mid-Phase-1 produces non-stationary signal | Low | strategy underperforms | Acceptable on paper; revisit at G4 |
@@ -251,3 +251,4 @@ Items still requiring Oleg's input or action (G0 passed 2026-04-26; remaining it
 - **v0.1 (2026-04-26)** — initial draft. M0..M3 detailed; M4+ sketched. Five quality gates defined. Risk register seeded. Conditional on OQ-024..OQ-027 default confirmation.
 - **v0.1.1 (2026-04-26)** — operator confirmed OQ-024..OQ-027. Phase 1 specifics table promoted from "proposed" to confirmed values, citing ADR-020..023 instead of OQs. **G0 gate passed.** Remaining operator dependencies are now operational prereqs for G2 (IB Paper account, EODHD coverage, deployment target).
 - **v0.1.2 (2026-04-26)** — **M0 closed; G1 gate PASSED**. All ten M0 deliverables landed (scaffolding, DD-1 STABLE, INV-13 STABLE, INV-6 DRAFT, INV-5 DRAFT, domain layer, paper / in-memory / clock adapters, tests, import-linter contract + negative test, CONTEXT_INVENTORY sync). 113 tests green; mypy strict clean; both contracts KEPT. See [RETRO-M0](./docs/retros/M0_retrospective.md). Next milestone is M1 — see [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.2.
+- **v0.1.3 (2026-04-27)** — **M1 closed; G2 gate PARTIAL.** All seven M1 deliverables landed (smoke-import, strategy loader, btest engine wiring via `SingleAssetRunner` per OQ-030, Sizer with ADR-027 rounding, RiskEngine M1-subset RC-08/09/12/13, paper-mode pipeline, DD-3 DRAFT). Plus PaperMarketData / LogAlert / PaperBroker.replace / RiskBreach domain-event relocation. ADR-027..029 ACCEPTED; OQ-030 raised; INV-5/INV-6 promoted to STABLE. 175 tests green; mypy strict clean; both contracts KEPT. See [RETRO-M1](./docs/retros/M1_retrospective.md). G2 ±1 bps real-data parity run is operator-deferred (needs EODHD CAC.PA fixture + TKAN artefact + momentum factor). M2 begins after G2 closure — see [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.3.

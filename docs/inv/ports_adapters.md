@@ -1,10 +1,10 @@
 ---
 id: INV-6
 title: Ports & Adapters
-status: DRAFT
+status: STABLE
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.2
 sources:
   - REQUIREMENTS.md §7.2 (Port signatures)
   - DD-1 §1, §2 (types referenced in signatures)
@@ -153,7 +153,7 @@ land in.
 
 | Adapter | Module | Status | Milestone |
 |---------|--------|--------|-----------|
-| `PaperMarketData` (deterministic-fixture) | `blive.adapters.paper.market_data` | MISSING | M1 |
+| `PaperMarketData` (deterministic-fixture) | `blive.adapters.paper.market_data` | M1 implemented | M1 |
 | `IBMarketData` | `blive.adapters.ib.market_data` | MISSING | M2 |
 | `EODHDMarketData` | `blive.adapters.eodhd.market_data` | MISSING | M2 |
 
@@ -175,7 +175,7 @@ land in.
 
 | Adapter | Module | Status | Milestone |
 |---------|--------|--------|-----------|
-| `LogAlert` (writes to logger) | `blive.adapters.alert.log` | MISSING | M1 |
+| `LogAlert` (writes to logger) | `blive.adapters.alert.log` | M1 implemented | M1 |
 | `SlackAlert` | `blive.adapters.alert.slack` | MISSING | M7 |
 | `EmailAlert` | `blive.adapters.alert.email` | MISSING | M7 |
 
@@ -212,3 +212,4 @@ None blocking M0; richer signatures will be needed when M2/M3 adapters land.
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. Ports lifted from REQUIREMENTS §7.2; adapter status reflects M0 plan.
+- **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `PaperMarketData` (§2.2) and `LogAlert` (§2.5) landed; `PaperBroker.replace()` (§2.1) now in-place per ADR-029-paired follow-up. M2-tier adapters remain MISSING. Port Protocol surfaces unchanged from v0.1.

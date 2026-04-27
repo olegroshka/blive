@@ -168,19 +168,7 @@ async def test_submit_is_idempotent_on_same_client_order_id(
     assert len(await broker.open_orders()) == 1
 
 
-# --- Replace placeholder ----------------------------------------------------
-
-
-async def test_replace_raises_not_implemented_at_m0(
-    make_order: Callable[..., Order],
-) -> None:
-    clock = SimClock()
-    broker = PaperBroker(clock, lambda _i: Decimal("78.42"))
-    await broker.connect()
-    order = make_order(order_type=OrderType.LMT, limit_price=Decimal("80.00"))
-    await broker.submit(order)
-    with pytest.raises(NotImplementedError):
-        await broker.replace(order.client_order_id, OrderUpdate(quantity=Decimal("20")))
+# --- Replace landed at M1; richer cases live in test_paper_broker_replace.py
 
 
 # --- Account snapshot stub --------------------------------------------------

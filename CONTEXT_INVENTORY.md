@@ -59,8 +59,8 @@ This file is the index of all of those. It does not contain the knowledge itself
 | 2. Requirements | [`REQUIREMENTS.md`](./REQUIREMENTS.md) | DRAFT v0.1 | iterative until M0 frozen | what we will build |
 | 3. Design | `DESIGN.md` | MISSING | iterative through M2 | how it is shaped (component, sequence, state diagrams) |
 | 4. Plan | [`TASK_REGISTRY.md`](./TASK_REGISTRY.md) | DRAFT v0.1 (2026-04-26) | per milestone | Phase 1 plan: M0–M3 detailed with G0–G4 gates and risk register; M4+ sketched. Conditional on OQ-024..027 confirmation. |
-| 5. Code | `src/blive/` | DRAFT v0.1 (2026-04-26) | continuous | M0 ships: `domain/{types,events,order_fsm,ports,positions}.py`; `adapters/{paper.broker, memory.{persistence,bus}, clock.{wall,sim}}`. Strict mypy clean (16 src files). |
-| 6. Tests | `tests/` | DRAFT v0.1 (2026-04-26) | continuous | M0 ships: 113 tests across `unit/{domain,adapters}/*` and `contracts/test_import_linter.py`. PaperBroker round-trip + golden FSM exit criteria green. |
+| 5. Code | `src/blive/` | DRAFT v0.2 (2026-04-27) | continuous | M0+M1: `domain/{types,events,order_fsm,ports,positions}.py`; `adapters/{paper.{broker,market_data}, memory.{persistence,bus}, clock.{wall,sim}, alert.log}`; `strategy/{config,loader}.py`; `sizing/sizer.py`; `risk/checks.py`; `runtime/paper_pipeline.py`. |
+| 6. Tests | `tests/` | DRAFT v0.2 (2026-04-27) | continuous | 175 tests green; M1 adds `unit/{strategy,sizing,risk,runtime}/*`, `unit/adapters/{paper/test_market_data,paper/test_paper_broker_replace,alert/test_log_alert}/*`, and `contracts/test_btest_imports.py`. PaperBroker round-trip + FSM coverage from M0 retained. |
 | 7. Ops | `RUNBOOK.md` | MISSING | post-M5 | running it |
 
 Rule: each layer down narrows scope and is internally consistent with the layer above. If layer N changes, layer N-1 either approved the change (forward propagation) or is now stale (must be flagged).
@@ -82,8 +82,8 @@ Durable, slow-changing context. Each KB is one file under `docs/kb/` with a head
 | **KB-7** | `docs/kb/failure_modes.md` | MISSING | Every failure mode + required engine response + chaos-test fixture. Expansion of REQUIREMENTS §13.2. | Claude | REQUIREMENTS, DESIGN |
 | **KB-8** | `docs/kb/operational_events.md` | MISSING | Daily TWS restart at 23:45 ET, weekly token, holidays, exchange schedules, corp actions, IB maintenance windows. | Claude | DESIGN, OPS |
 | **KB-9** | [`docs/kb/uk_regulatory.md`](./docs/kb/uk_regulatory.md) | DRAFT v0.1 (2026-04-26) | Personal trading not FCA-regulated; HMRC trade-by-trade records 5+ years; existing event-log + hash-chained audit already satisfies MiFID-II shape; market abuse always applies; data privacy n/a personal. Items needing accountant/lawyer flagged. **(Oleg / professional)** confirmation expected on trading-vs-investment classification. | Oleg primary | REQUIREMENTS (NFRs) |
-| **KB-10** | [`docs/decisions/DECISIONS.md`](./docs/decisions/DECISIONS.md) | DRAFT v0.4 (2026-04-26) | ADR-001..026 on disk: 12 backfill from REQUIREMENTS + 7 from initial OQ resolutions + 4 Phase 1 operational specifics + 3 discipline amendments (RETRO artefact type, milestone-close + phase-boundary rules, agentic-execution layer with five-layer adoption stack). All ACCEPTED. | Claude record, Oleg approve | continuous |
-| **KB-11** | [`docs/decisions/OPEN_QUESTIONS.md`](./docs/decisions/OPEN_QUESTIONS.md) | DRAFT v0.1.4 (2026-04-26) | OQ-001..029 catalogued. **12 RESOLVED-BY-ADR** (013, 014, 015, 016, 018, 019, 021, 022, 024, 025, 026, 027); 1 RESOLVED-by-finding (017); 4 OPEN (012 parity calibration at M7; 023 ForgeFolio post-M8; **028 agentic memory framework choice**; **029 L0+L1 implementation timing**); 12 IN_DISCUSSION (001–011, 020). | shared | continuous |
+| **KB-10** | [`docs/decisions/DECISIONS.md`](./docs/decisions/DECISIONS.md) | DRAFT v0.5 (2026-04-27) | ADR-001..029 ACCEPTED. Latest batch ADR-027..029 (M1 entry): Sizer rounding policy (integer shares, truncate toward zero), strategy config shape (Python `build_strategy()` + blive YAML overrides; DD-3 prep), `PaperMarketData` as `MarketDataPort` adapter (fixture-backed parquet). | Claude record, Oleg approve | continuous |
+| **KB-11** | [`docs/decisions/OPEN_QUESTIONS.md`](./docs/decisions/OPEN_QUESTIONS.md) | DRAFT v0.2 (2026-04-27) | OQ-001..030 catalogued. **12 RESOLVED-BY-ADR** (013, 014, 015, 016, 018, 019, 021, 022, 024, 025, 026, 027); 1 RESOLVED-by-finding (017); 4 OPEN (012, 023, 028, 029); 13 IN_DISCUSSION (001–011, 020, **030 btest-interpreter dispatch for non-LongShort archetypes — raised at M1**). | shared | continuous |
 | **KB-12** | [`docs/GLOSSARY.md`](./docs/GLOSSARY.md) | DRAFT v0.1 (2026-04-26) | Extracted from REQUIREMENTS §17 + accumulated terms (archetype, ADR, parity envelope, parity diagnostic, parity residual, NDJSON tape, OPRA, SMART, TIF, TKAN, tradable proxy, etc.). Now SSOT for terminology. | Claude | continuous |
 | **KB-13** | [`docs/kb/companion_projects.md`](./docs/kb/companion_projects.md) | DRAFT v0.1 (2026-04-26) | btest = primary dependency (blive imports engines + DSL). harp = paper, indirect via deferred A1 strategy. pt-liqadj = independent, bond focus. ForgeFolio = monitoring, possibly post-M8 read-only integration (raised OQ-023). b-autobot = empty placeholder. equities/smim/* = research-only, UK-LC/UK-MC candidate post-M8. | Oleg primary, Claude assist | REQUIREMENTS |
 | **KB-14** | Claude memory `~/.claude/projects/.../memory/` | STABLE | User profile, feedback, project context that persists across conversations. Already maintained. | implicit | continuous |
@@ -101,8 +101,8 @@ Exhaustive lists in well-defined categories. Each lives at `docs/inv/<name>.md` 
 | **INV-2** | `docs/inv/order_types.md` | MISSING | MKT, LMT, MOC, LOC, STP, STP_LMT, OPG, IOC, FOK + IB support matrix per asset class | REQUIREMENTS, DESIGN |
 | **INV-3** | `docs/inv/tif_values.md` | MISSING | DAY, GTC, IOC, FOK, OPG, GTD + venue compatibility | DESIGN |
 | **INV-4** | [`docs/inv/risk_checks.md`](./docs/inv/risk_checks.md) | DRAFT v0.1 (2026-04-26) | RC-01..RC-13: leverage, exposure, weight, daily loss, rate limits (per-strategy + global), concentration, stale data, market hours, price sanity, drawdown scaling, model-artefact freshness, kill-switch armed. Order-of-evaluation specified. | REQUIREMENTS |
-| **INV-5** | [`docs/inv/domain_events.md`](./docs/inv/domain_events.md) | DRAFT v0.1 (2026-04-26) | 17 event topics catalogued with payload, emission rule, consumer set, milestone. M0 ships order.* + broker.connection; later events forward-planned. `DomainEvent` union widens milestone-by-milestone. | DESIGN |
-| **INV-6** | [`docs/inv/ports_adapters.md`](./docs/inv/ports_adapters.md) | DRAFT v0.1 (2026-04-26) | 6 Ports (Broker, MarketData, Clock, Persistence, Alert, EventBus) lifted from REQUIREMENTS §7.2 with full Protocol signatures. Adapter status tracker per Port (PaperBroker/InMemoryPersistence/InMemoryEventBus/Sim+WallClock implemented at M0; IB at M2/M3). | DESIGN |
+| **INV-5** | [`docs/inv/domain_events.md`](./docs/inv/domain_events.md) | STABLE v0.2 (2026-04-27) | 17 event topics catalogued with payload, emission rule, consumer set, milestone. M0+M1 implemented: order.*, broker.connection, risk.breach. `DomainEvent = OrderEvent \| ConnectionStatus \| RiskBreach`. Other events (M2+) remain forward-planned. | DESIGN |
+| **INV-6** | [`docs/inv/ports_adapters.md`](./docs/inv/ports_adapters.md) | STABLE v0.2 (2026-04-27) | 6 Ports (Broker, MarketData, Clock, Persistence, Alert, EventBus). M0+M1 adapters live: PaperBroker (incl. replace), PaperMarketData, InMemoryPersistence, InMemoryEventBus, Sim/WallClock, LogAlert. IB & EODHD adapters at M2/M3. Port Protocol surfaces unchanged from v0.1. | DESIGN |
 | **INV-7** | `docs/inv/rest_endpoints.md` | MISSING (eventually superseded by OpenAPI) | path, method, auth class, request/response, idempotency | M6 |
 | **INV-8** | `docs/inv/metrics.md` | MISSING | Prometheus metric name, type, labels, alert thresholds | DESIGN, M7 |
 | **INV-9** | `docs/inv/alerts.md` | MISSING | alert name, trigger condition, severity, channels, runbook link | M7 |
@@ -122,7 +122,7 @@ Schema-level documentation. Each `docs/dd/<name>.md` lists every field with type
 |----|------|--------|----------|-----------|
 | **DD-1** | [`docs/dd/domain_objects.md`](./docs/dd/domain_objects.md) | STABLE v0.1 (2026-04-26) | 11 types: Instrument, Bar, Trade, Order, Fill, OrderEvent, Position, AccountSnapshot, OrderUpdate, ConnectionStatus, BrokerEvent (alias). Plus 7 enums (OrderSide/Type/TIF/State/EventKind, AssetClass, Severity). Field-level invariants enforced in `__post_init__`. | DESIGN |
 | **DD-2** | `docs/dd/event_schemas.md` | MISSING | Every domain event payload, JSON shape, version field policy | DESIGN |
-| **DD-3** | `docs/dd/config_schemas.md` | MISSING | Every YAML config knob, type, default, range, override path | DESIGN |
+| **DD-3** | [`docs/dd/config_schemas.md`](./docs/dd/config_schemas.md) | DRAFT v0.1 (2026-04-27) | `LiveStrategyConfig` + 6 sub-objects (`LiveOverrides`, `LiveBorrowProvider`, `LiveFinancingProvider`, `LiveKillSwitch`, `ArtefactPaths`, `RiskOverrides`); merge order; worked `tkan_v4_momentum_timing_1x` example. M1 RC subset only; M4-tier RC keys forward-compat-ignored. | DESIGN |
 | **DD-4** | `docs/dd/storage_schemas.md` | MISSING | SQLite DDL for every table, indexes, migrations | DESIGN, M4 |
 | **DD-5** | `docs/dd/api_schemas.md` | MISSING (eventually OpenAPI) | REST request/response schemas | M6 |
 | **DD-6** | `docs/dd/metric_schemas.md` | MISSING | Prometheus metric definitions in code-checkable form | M7 |
@@ -164,6 +164,7 @@ Frozen per-milestone records per [ADR-024](./docs/decisions/DECISIONS.md#adr-024
 |----|------|--------|--------|-------|
 | **RETRO-template** | [`docs/retros/_template.md`](./docs/retros/_template.md) | STABLE | — | template; copy to `M{N}_retrospective.md` at milestone close |
 | **RETRO-M0** | [`docs/retros/M0_retrospective.md`](./docs/retros/M0_retrospective.md) | STABLE v1.0 (2026-04-26) | M0 (G1 PASSED) | M0 close: substrate (DD-1, INV-13, INV-5, INV-6) + domain code + paper/memory/clock adapters + 113 tests + import-linter rule with negative test |
+| **RETRO-M1** | [`docs/retros/M1_retrospective.md`](./docs/retros/M1_retrospective.md) | STABLE v1.0 (2026-04-27) | M1 (G2 PARTIAL) | M1 close: ADR-027..029 ACCEPTED; DD-3 → DRAFT; INV-5/INV-6 → STABLE; OQ-030 raised; strategy loader / Sizer / RiskEngine M1-subset / PaperMarketData / LogAlert / PaperBroker.replace / paper-mode pipeline; 175 tests + CI smoke-import; G2 real-data ±1 bps deferred to operator EODHD+TKAN run |
 
 ---
 
@@ -334,9 +335,14 @@ Ordered by what unblocks REQUIREMENTS finalization:
 **Outstanding queue (in order)**:
 
 1. ~~Operator confirmation of OQ-024..OQ-027.~~ ✓ Done 2026-04-26; ADR-020..023 added; G0 gate **PASSED**.
-2. ~~**M0 execution**~~ ✓ Done 2026-04-26. Repo scaffolding, DD-1 (STABLE), INV-13 (STABLE), INV-6 (DRAFT), INV-5 (DRAFT), domain code, paper/memory/clock adapters, 113 tests green, mypy strict clean, import-linter contracts KEPT including hermetic negative test. **G1 gate exit criteria met** — see [RETRO-M0](./docs/retros/M0_retrospective.md).
-3. **M1 execution** — next concrete work per `TASK_REGISTRY.md` M1: btest strategy ingest, Sizer minimal, RiskEngine M1 subset (RC-08, RC-09, RC-13), paper-mode end-to-end pipeline running `tkan_v4_momentum_timing` 1× on fixture-backed CAC.PA bars; equity-curve match within ±1 bps. Exit at G2.
-4. **Operator-side prereqs for G2** (IB Paper account, EODHD subscription coverage for CAC, Docker host decision) — can run in parallel with M1; required at G2 gate before M2.
+2. ~~**M0 execution**~~ ✓ Done 2026-04-26. **G1 gate exit criteria met** — see [RETRO-M0](./docs/retros/M0_retrospective.md).
+3. ~~**M1 execution**~~ ✓ Done 2026-04-27. ADR-027..029 ACCEPTED; DD-3 → DRAFT; INV-5/INV-6 → STABLE; OQ-030 raised; strategy loader / Sizer / RiskEngine M1-subset (RC-08/09/12/13) / PaperMarketData / LogAlert / PaperBroker.replace() / paper-mode pipeline shipped; 175 tests green; CI smoke-import for btest engines added. RETRO-M1 written. **G2 gate criteria 1–4: see [RETRO-M1](./docs/retros/M1_retrospective.md) for partial-pass detail (synthetic-fixture parity green; full real-data ±1 bps test deferred to operator-driven `tests_slow/g2_parity` run with EODHD CAC.PA + TKAN artefact).**
+4. **Operator-side prereqs for G2 → M2**:
+   - IB Paper account commissioned (operator). **OPEN.**
+   - **EODHD subscription for CAC.PA** — ✓ **verified 2026-04-27** (CAC.PA daily EOD + delayed real-time quotes confirmed in tier). Open small follow-up for M2: correct CAC-40 *index* ticker on EODHD (try `PX1.INDX` / `^FCHI`); not a G2 blocker since [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) trades the ETF.
+   - Docker host decision (Linux VM vs Windows). **OPEN.**
+   - **Real-data G2 ±1 bps parity run** — pipeline ready; needs EODHD CAC.PA daily history fixture + TKAN `pred_cache.pkl` + `cact_momentum.parquet`. **OPEN.** EODHD CAC.PA path now confirmed; the fetch script for the fixture is itself an M2 deliverable per [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.3.
+5. **M2 execution** — IB read-side adapter + operational foundation per [TASK_REGISTRY](./TASK_REGISTRY.md) M2; conditioned on G2 closure. [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.3 drafted at M1 close.
 
 Outside the Phase 1 critical path:
 

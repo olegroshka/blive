@@ -1,10 +1,10 @@
 ---
 id: INV-5
 title: Domain Events
-status: DRAFT
+status: STABLE
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.2
 sources:
   - REQUIREMENTS.md §5.3 (order events)
   - REQUIREMENTS.md §5.5 (risk events, kill-switch)
@@ -129,3 +129,4 @@ milestones land.
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. M0 events (order events, connection) live; later events catalogued for forward-planning.
+- **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `RiskBreach` (M1) implemented in `blive.domain.events` (relocated from `blive.risk.checks` to honour the layer hierarchy); `DomainEvent = OrderEvent | ConnectionStatus | RiskBreach`. Other catalogued events (M2+) remain forward-planned, not yet code.

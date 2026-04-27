@@ -1,20 +1,22 @@
 """Domain events.
 
 SSOT is :doc:`../../docs/inv/domain_events.md` (INV-5). The ``DomainEvent``
-union widens milestone-by-milestone; M0 ships ``OrderEvent`` and
-``ConnectionStatus``.
+union widens milestone-by-milestone; M1 adds :class:`RiskBreach` (INV-5
+row ``risk.breach``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import TypeAlias
 from uuid import UUID
 
 from blive.domain.types import (
     Fill,
     OrderEventKind,
+    Severity,
     _require_utc,
 )
 
@@ -72,14 +74,71 @@ class ConnectionStatus:
         _require_utc(self.time_utc, "ConnectionStatus.time_utc")
 
 
+# --- RiskBreach (INV-5 row `risk.breach`; M1) -------------------------------
+
+
+class RiskBreachSeverity(StrEnum):
+    """Per INV-4 §"On-breach actions"."""
+
+    BLOCK = "block"
+    SCALE = "scale"
+    WARN = "warn"
+
+
+class RiskCheckCode(StrEnum):
+    """Stable identifiers matching INV-4 row labels.
+
+    Values are M1 subset; widens at M4 with the rest of the RC set.
+    """
+
+    RC_08 = "RC-08"  # stale data
+    RC_09 = "RC-09"  # market hours
+    RC_12 = "RC-12"  # model-artefact freshness
+    RC_13 = "RC-13"  # kill-switch armed
+
+
+@dataclass(frozen=True, slots=True)
+class RiskBreach:
+    """One risk-check breach observed by the RiskEngine.
+
+    Lives on the domain-event side per INV-5 §2 so the ``DomainEvent`` union
+    can include it without inverting the layer dependency
+    (``blive.risk`` → ``blive.domain``).
+    """
+
+    strategy_id: str
+    check: RiskCheckCode
+    severity: RiskBreachSeverity
+    detail: str
+    time_utc: datetime
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id:
+            raise ValueError("RiskBreach.strategy_id must be non-empty")
+        if not self.detail:
+            raise ValueError("RiskBreach.detail must be non-empty")
+        _require_utc(self.time_utc, "RiskBreach.time_utc")
+
+    def alert_severity(self) -> Severity:
+        """Map RiskBreachSeverity → AlertPort.Severity per INV-13 §4."""
+        if self.severity == RiskBreachSeverity.BLOCK:
+            return Severity.HIGH
+        if self.severity == RiskBreachSeverity.SCALE:
+            return Severity.MEDIUM
+        return Severity.LOW
+
+
 # --- DomainEvent union (INV-5 §2) -------------------------------------------
 
-# M0 subset. Widens as later milestones land per INV-5 §2.
-DomainEvent: TypeAlias = OrderEvent | ConnectionStatus
+# M0+M1 subset. Widens as later milestones land per INV-5 §2.
+DomainEvent: TypeAlias = OrderEvent | ConnectionStatus | RiskBreach
 
 
 __all__ = [
     "OrderEvent",
     "ConnectionStatus",
+    "RiskBreach",
+    "RiskBreachSeverity",
+    "RiskCheckCode",
     "DomainEvent",
 ]

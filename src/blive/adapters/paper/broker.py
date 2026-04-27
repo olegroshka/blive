@@ -4,7 +4,7 @@ Deterministic in-process matcher for development and unit tests. Honours
 the order FSM (INV-13) by emitting ``OrderEvent``s in the canonical
 sequence; never touches a wire.
 
-M0 scope:
+M0 / M1 scope:
 
 - Only ``MKT`` orders are matched (fill at the price returned by the
   ``price_lookup`` callable). ``LMT`` and stop variants are held in the
@@ -12,12 +12,17 @@ M0 scope:
 - Position tracking is **not** done here; the engine derives positions
   from observed fills via :func:`blive.domain.positions.apply_fill`.
 - ``account_snapshot`` returns a fixed stub.
-- ``replace`` raises :class:`NotImplementedError` until M1.
+- ``replace`` (M1) is in-place mutation of the open order's fields. INV-13
+  does not currently include a replace trigger; the order keeps its FSM
+  state and ``client_order_id`` and future fills evaluate against the new
+  fields. This matches IB-side semantics: ``modifyOrder`` does not transition
+  the venue's order status.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from decimal import Decimal
 from typing import AsyncIterator, Callable
 from uuid import UUID
@@ -123,7 +128,22 @@ class PaperBroker:
         )
 
     async def replace(self, client_order_id: ClientOrderId, new: OrderUpdate) -> None:
-        raise NotImplementedError("PaperBroker.replace lands at M1 alongside the Sizer")
+        if client_order_id not in self._open_orders:
+            # Idempotent like cancel(): if the order has already terminated
+            # there is nothing to replace.
+            return
+        original = self._open_orders[client_order_id]
+        # OrderUpdate guarantees at least one field is non-None
+        # (validated in DD-1 §2.9 / domain.types). Validate the merged
+        # Order via ``dataclasses.replace``; __post_init__ in DD-1 catches
+        # limit/stop discipline and the strict-positive rules.
+        replaced = dataclasses.replace(
+            original,
+            quantity=new.quantity if new.quantity is not None else original.quantity,
+            limit_price=(new.limit_price if new.limit_price is not None else original.limit_price),
+            stop_price=new.stop_price if new.stop_price is not None else original.stop_price,
+        )
+        self._open_orders[client_order_id] = replaced
 
     async def open_orders(self) -> list[Order]:
         return list(self._open_orders.values())

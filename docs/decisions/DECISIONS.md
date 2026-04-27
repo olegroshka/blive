@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.5
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -56,6 +56,9 @@ referenced_by:
 | [ADR-024](#adr-024--add-session-retrospective-artefact-type) | Add session-retrospective artefact type | ACCEPTED | 2026-04-26 | — |
 | [ADR-025](#adr-025--amend-context_protocol-83-with-milestone-close-and-phase-boundary-rules) | Amend CONTEXT_PROTOCOL §8.3 with milestone-close and phase-boundary rules | ACCEPTED | 2026-04-26 | — |
 | [ADR-026](#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface) | Adopt agentic-execution layer; reduce human action surface | ACCEPTED | 2026-04-26 | — |
+| [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) | Sizer rounding policy: integer shares, truncate toward zero | ACCEPTED | 2026-04-27 | — |
+| [ADR-028](#adr-028--strategy-config-shape-python-build_strategy--blive-yaml-overrides) | Strategy config shape: Python `build_strategy()` + blive YAML overrides | ACCEPTED | 2026-04-27 | — |
+| [ADR-029](#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet) | `PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet | ACCEPTED | 2026-04-27 | — |
 
 ---
 
@@ -893,9 +896,187 @@ Codify a five-layer adoption stack:
 
 ---
 
+## ADR-027 — Sizer rounding policy: integer shares, truncate toward zero
+
+- **status:** ACCEPTED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+The Sizer ([REQUIREMENTS §5.13](../../REQUIREMENTS.md)) converts `target_weight ∈ [-1, 1]`, `equity`, and `price` into a concrete `Order.quantity` (a `Decimal` per [DD-1 §2.4](../dd/domain_objects.md#24-order)). The arithmetic `(equity * target_weight) / price` in general yields a non-integer. We must commit to a rounding rule before writing code, because:
+
+1. The rule directly affects the M1 G2 parity envelope (±1 bps end-of-period equity match against btest). Rounding is the *only* legitimate source of drift between btest and blive when the engines are imported by reference per [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import).
+2. Different IB account classes support different precisions. Cash accounts can hold fractional shares of *some US-listed instruments only* (excludes ADRs, OTC, leveraged ETFs in some periods, and *all European venues*). Margin accounts are integer-only across the board.
+3. The Phase 1 instrument is `CAC.PA` on XPAR ([ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf)) — fractional shares are not available on European venues regardless of account class. So the integer rule is forced for Phase 1; the only question is whether to design for fractional later.
+
+### Decision
+
+For v1 (Phases 1–3), the Sizer **rounds to integer shares using truncation toward zero** (`Decimal.quantize(Decimal("1"), rounding=ROUND_DOWN)` for positive desired quantities; `ROUND_UP` toward zero for negative). Sub-share desired quantities (`abs(desired) < 1`) produce **no order** (the rebalance is a no-op for that instrument).
+
+The Sizer's interface admits an `instrument_precision: Decimal` parameter defaulted to `Decimal("1")` (integer). Future fractional-share support flips the default per asset class via the `Instrument` lookup; the change is additive, not breaking.
+
+**Parity contract.** btest's `event_driven` engine's sizing path must be inspected during M1 implementation; if btest does not already round to integer shares, we file an OQ on the parity-arithmetic question rather than papering over divergence.
+
+### Alternatives Considered
+
+1. **Round to IB fractional precision per account class.** Rejected for v1: precision varies per `(account_class, instrument)` tuple and is not stable; introduces a cross-cutting query into the Sizer that the broker port doesn't currently expose; adds complexity for a Phase-1 instrument that doesn't support it anyway.
+2. **Round to nearest (banker's rounding / `ROUND_HALF_EVEN`).** Rejected: half-share boundary cases on small allocations cause asymmetric over-/under-sizing relative to a deterministic truncate-toward-zero rule. ROUND_DOWN is conservative (always under-size, never over).
+3. **Allow fractional `Decimal` quantities and let the broker reject.** Rejected: late failure; risk-engine bypass smell; obscures parity test.
+4. **Fixed-precision per `Instrument`** (the precision field stored on `Instrument`). Considered, deferred: requires `Instrument` to grow a field, which would be a DD-1 change. Re-raise at M2 when fractional becomes plausible for US ETFs.
+
+### Consequences
+
+- **Positive:** deterministic, conservative, reproducible. Parity test against btest reduces to a known-shape check.
+- **Positive:** Sub-share rebalances become no-ops, which is the right default for Phase 1's small NAV slice (5–10%, [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10)) where rebalance fractions of e.g. 0.4 share happen on small price gaps.
+- **Negative:** tracking error vs. target weight on small accounts; mitigated by Phase 1 NAV slice cap (~€50k–€100k notional on a ~€78 share is ≥ 600 shares, so tracking error on 1 share is < 17 bps — well-bounded).
+- **Negative:** when the strategy goes to/from flat, a single 1-share leftover position can persist after the "exit" rebalance if the new target rounds to zero but the old position was not zero. M1 implementation must explicitly reset to zero on exit signals (not derive zero by rounding).
+- **Follow-ups:** revisit at G2 with observed parity envelope; revisit at M2 entry when fractional shares become plausible for US ETF strategies (Phase 2 A3 — `triple_lev_sma_filter_dsl`).
+
+### Cross-References
+
+- [REQUIREMENTS §5.13](../../REQUIREMENTS.md) — Sizer scope.
+- [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) — engine reuse; parity assumption.
+- [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — Phase 1 instrument.
+- [DD-1 §2.4](../dd/domain_objects.md#24-order) — `Order.quantity` is `Decimal`.
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M1 G2 — ±1 bps parity criterion.
+
+---
+
+## ADR-028 — Strategy config shape: Python `build_strategy()` + blive YAML overrides
+
+- **status:** ACCEPTED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[REQUIREMENTS §5.1](../../REQUIREMENTS.md) commits blive to importing an unmodified `btest.Strategy` dataclass. [REQUIREMENTS §5.13](../../REQUIREMENTS.md) commits to strategy discovery via Python modules exposing `build_strategy(config: dict) -> Strategy`. blive adds three sidecar extensions: `execution.live_overrides`, `costs.live_*_provider` hooks, `risk.live_kill_switch`.
+
+DD-3 ([CONTEXT_INVENTORY §4](../../CONTEXT_INVENTORY.md#4-data-dictionaries-dds), MISSING) is the data dictionary for these YAML knobs. Before we author DD-3 we must lock the *shape*: where the canonical strategy spec lives, where blive-only overrides live, how they merge, and how the spec id (`sha256(resolved_yaml + ...)` per [REQUIREMENTS §5.12](../../REQUIREMENTS.md)) is computed.
+
+Three options have been considered:
+
+1. **Single YAML, btest-extended.** Extend btest's existing strategy YAML with new keys; btest must ignore unknown keys. Risk: btest's validators reject unknown keys; blive would have to fork btest's loader.
+2. **Single YAML, blive-owned.** Replace btest's loader entirely; build the btest `Strategy` from blive's YAML. Risk: parallel maintenance of every btest DSL field shape; high drift.
+3. **Hybrid: Python module produces `Strategy`, blive YAML provides live-only overrides keyed by strategy_id.** The Python module is btest's existing `build_strategy()`. blive's YAML lives next to the module and carries only blive-specific keys (live_overrides, kill_switch, NAV slice, artefact paths, RC threshold overrides).
+
+### Decision
+
+Adopt **Option 3 (hybrid)**.
+
+**Strategy ingest pipeline:**
+
+1. blive YAML at `~/.blive/strategies/{strategy_id}/live.yaml` declares:
+   - `strategy_module: str` — dotted-path Python module (e.g. `btest.strategies.tkan_v4_momentum_timing`).
+   - `build_strategy_kwargs: dict` — kwargs passed to the module's `build_strategy(**kwargs)` call.
+   - `nav_slice: Decimal` — fraction of account NAV allocated; capped at 0.10 per [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10).
+   - `live_overrides: { tif, routing, ib_algo, outside_rth, ... }` — overlays `Strategy.execution.live_overrides`.
+   - `live_borrow_provider: { kind, config }` — overlays `Strategy.costs.live_borrow_provider`.
+   - `live_financing_provider: { kind, config }` — overlays `Strategy.costs.live_financing_provider`.
+   - `live_kill_switch: { max_intraday_drawdown, max_consecutive_rejects, ... }` — per-strategy kill criteria.
+   - `artefact_paths: dict[str, str]` — overrides for `ExternalFactor.path` (so prod artefact path differs from research path per [ADR-023](#adr-023--tkan-artefact-path-and-refresh-ownership)).
+   - `risk_overrides: dict[str, Decimal]` — per-strategy overrides for [INV-4](../inv/risk_checks.md) thresholds (`max_data_staleness_intraday_sec`, `max_model_artefact_age_days`, etc.).
+
+2. blive's loader (`blive.strategy.loader`) parses YAML via Pydantic v2 models (per CLAUDE.md "all tunables read from YAML config via Pydantic"), imports the module, calls `build_strategy(**build_strategy_kwargs)`, then applies overrides as a structured patch to the resulting `Strategy`.
+
+3. **Spec id computation:** SHA-256 of `(canonical_yaml_bytes, strategy_module_dotted_path, btest_version, blive_version, artefact_sha256_for_each_external_factor)`. Recorded with every domain event per [REQUIREMENTS §5.12](../../REQUIREMENTS.md).
+
+**Override merge rules:**
+
+- Numeric scalars in `live_overrides` / `live_kill_switch` / `risk_overrides` overwrite by key.
+- `artefact_paths` overwrites `ExternalFactor.path` by factor name.
+- Forbidden overrides per [REQUIREMENTS §5.10](../../REQUIREMENTS.md): type fields, universe definition, factor / signal DAG topology. The override applier raises if a forbidden field appears.
+
+### Alternatives Considered
+
+1. **Single YAML btest-extended** — rejected (above): forks btest's loader.
+2. **Single YAML blive-owned** — rejected (above): high drift maintenance.
+3. **JSON Patch (RFC 6902) overrides** ([REQUIREMENTS §5.10](../../REQUIREMENTS.md) suggested this for runtime parameter overrides). Considered: structured, validated. Decision: keep JSON Patch as the mechanism for *runtime* parameter overrides (Strategy detail page form). Persistent strategy config uses the structured YAML schema above for ergonomics. Both end up applying patches against the resolved tree; the *grammar* of validation is the same.
+
+### Consequences
+
+- **Positive:** btest stays untouched; blive owns its sidecar config without forking. Strategy discovery is the existing Python-module pattern from REQUIREMENTS §5.13.
+- **Positive:** YAML is human-readable for ops; Pydantic validation gives clear errors at startup.
+- **Positive:** spec id remains stable across blive versions as long as YAML + module + artefact hashes don't change.
+- **Negative:** two locations for "what the strategy is" — the Python module and the YAML. Ops must understand both.
+- **Negative:** override application is a custom step; bugs there bypass btest's own validation. M1 unit tests must exercise allowed and forbidden override surfaces.
+- **Follow-ups:** DD-3 codifies the field-level schema after this ADR is accepted; M1 implementation produces the Pydantic models; M2 IB adapter reads `live_overrides.routing` / `live_overrides.ib_algo` and feeds them through.
+
+### Cross-References
+
+- [REQUIREMENTS §5.1, §5.10, §5.12, §5.13](../../REQUIREMENTS.md) — strategy ingest, override grammar, spec id, sizer / discovery.
+- [DD-3 config_schemas](../dd/config_schemas.md) — MISSING; authored against this ADR at M1.
+- [INV-4](../inv/risk_checks.md) — risk threshold override paths.
+- [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) — btest reuse contract.
+- [ADR-023](#adr-023--tkan-artefact-path-and-refresh-ownership) — artefact prod path policy.
+
+---
+
+## ADR-029 — `PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet
+
+- **status:** ACCEPTED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+The M1 paper-mode end-to-end pipeline ([TASK_REGISTRY](../../TASK_REGISTRY.md) M1 deliverable 6) needs a deterministic CAC.PA bar source. Two shapes are viable:
+
+1. **Ad-hoc fixture loading** — the test or runner reads a parquet file directly and feeds bars into the pipeline.
+2. **`PaperMarketData` as a `MarketDataPort` adapter** — `blive.adapters.paper.market_data.PaperMarketData` implements the [INV-6 §1.2](../inv/ports_adapters.md#12-marketdataport) Protocol and reads from a fixture file.
+
+The M0 retro recommendation 2 explicitly preferred (b). [INV-6 §2.2](../inv/ports_adapters.md#22-marketdataport-adapters) already lists `PaperMarketData` at M1 as MISSING. [ADR-014](#adr-014--data-sources-via-clean-api-abstraction) commits to all data sources implementing the existing `DataSource` protocol — `PaperMarketData` is the live-side analogue of btest's `parquet://` source.
+
+### Decision
+
+Implement `blive.adapters.paper.market_data.PaperMarketData` as a `MarketDataPort` adapter. Concrete shape:
+
+- **Source:** parquet file with columns `(open_time_utc, close_time_utc, open, high, low, close, volume)` and optional `vwap`. Path passed to constructor.
+- **Frequency:** initial scope is `1d` (Phase 1 = F0). Fixture parquet implies the bar frequency; mismatched `subscribe_bars(freq=...)` raises.
+- **Async iterator semantics:** `subscribe_bars(instrument, freq)` yields one `Bar` per row in chronological order, then awaits the next `clock.sleep(...)` tick if the runner is in real-time-paced mode, or yields immediately in tape-replay mode (M1 default).
+- **`subscribe_trades`:** raises `NotImplementedError` for v1 (no trade-level fixtures yet; Phase 1 F0 daily strategies don't subscribe to trades).
+- **`historical_bars`:** returns the slice of the fixture overlapping `[start, end]`; respects `instrument` lookup.
+- **Fixture location:** `tests_slow/fixtures/paper_market_data/{venue}/{symbol}_{freq}.parquet` for committed test fixtures; arbitrary path admitted at runtime via constructor.
+
+The adapter is the M1 substrate-level placeholder slot already declared in [INV-6 §2.2](../inv/ports_adapters.md#22-marketdataport-adapters). It also serves the long-running parity test (M7 continuous parity replay) by providing a deterministic playback engine inside blive's process.
+
+### Alternatives Considered
+
+1. **Ad-hoc fixture loading inside the test or runner.** Rejected per the M0 retro: violates [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) (the runner would have to know about parquet); doesn't exercise the `MarketDataPort` contract; M2's `IBMarketData` / `EODHDMarketData` would then have a different code path than M1's tests.
+2. **Use btest's `parquet://` source verbatim.** Considered: btest's `DataSource` returns a `DataBundle` of full DataFrames, not a stream of `Bar` objects. The shapes don't align with `MarketDataPort.subscribe_bars` async-iterator contract. Bridge code would be larger than a clean reimplementation.
+3. **Generate synthetic bars in-memory.** Considered for unit tests: too low-fidelity for the G2 ±1 bps parity test which needs real CAC.PA price history.
+
+### Consequences
+
+- **Positive:** unifies M1 paper test path with M2/M3 live test path — same `MarketDataPort` contract.
+- **Positive:** the parity test is reproducible from a checked-in parquet (or a deterministic fetch script that re-creates it from EODHD when needed).
+- **Positive:** the same adapter is the natural foundation for the M7 continuous-parity replica (`btest`-paper alongside live, see [ADR-012](#adr-012--parity-diagnostic-mandatory-daily-degraded-mode-if-broken)).
+- **Negative:** writing the adapter is real M1 work (~1 small module + tests). The ad-hoc alternative is cheaper *for M1 only*.
+- **Negative:** parquet fixture is repo weight; mitigated by limiting Phase 1 fixture to ≥ 252 trading days (~80 KB compressed for a single instrument).
+- **Follow-ups:** the EODHD historical-fetch script that produces the fixture is a Phase-1 utility (`scripts/fetch_paper_fixture.py`); itself an M1 deliverable so the fixture is reproducible.
+
+### Cross-References
+
+- [INV-6 §1.2, §2.2](../inv/ports_adapters.md) — `MarketDataPort` contract; adapter slot.
+- [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) — hexagonal contract; runner cannot read parquet directly.
+- [ADR-014](#adr-014--data-sources-via-clean-api-abstraction) — data sources via clean abstraction.
+- [ADR-017](#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing) — hybrid live data routing; M2 swaps in `IBMarketData` / `EODHDMarketData`.
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M1 deliverable 6 — paper-mode end-to-end pipeline.
+- [`docs/retros/M0_retrospective.md`](../retros/M0_retrospective.md) "Recommendations for NEXT_PROMPT M1" rec 2.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
 - **v0.2 (2026-04-26)** — added ADR-020..023 covering Phase 1 operational specifics: NAV slice (5–10% cap 10%), CAC ETF proxy (`CAC.PA`), TKAN freshness window (30d hard / 21d warn), TKAN artefact path and refresh ownership.
 - **v0.3 (2026-04-26)** — added ADR-024 (RETRO artefact type) and ADR-025 (protocol amendment for milestone-close + phase-boundary handoff rules).
 - **v0.4 (2026-04-26)** — added ADR-026 (agentic-execution layer; human-governance / agent-execution division of labour; five-layer adoption stack).
+- **v0.5 (2026-04-27)** — added ADR-027 (Sizer rounding policy: integer shares, truncate toward zero), ADR-028 (Strategy config shape: Python `build_strategy()` + blive YAML overrides), ADR-029 (`PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet) — drafted PROPOSED, accepted by operator same day; status flipped to ACCEPTED for all three.

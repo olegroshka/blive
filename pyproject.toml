@@ -17,6 +17,13 @@ authors = [{ name = "Oleg Roshka" }]
 dependencies = [
   "quantdsl-backtest",
   "ib_async>=2.1,<2.2",
+  # Strategy-config validation (DD-3, ADR-028).
+  "pydantic>=2.0,<3.0",
+  # YAML loader for blive's per-strategy live config.
+  "pyyaml>=6.0",
+  # Parquet reader for the M1 PaperMarketData fixture (ADR-029).
+  "pandas>=2.0",
+  "pyarrow>=15.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +36,8 @@ dev = [
   "black>=24.0",
   "isort>=5.13",
   "import-linter>=2.0",
+  "types-pyyaml>=6.0",
+  "pandas-stubs>=2.0",
 ]
 
 [project.urls]

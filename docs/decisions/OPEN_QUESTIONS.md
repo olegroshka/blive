@@ -3,8 +3,8 @@ id: KB-11
 title: Open Questions
 status: DRAFT
 owner: shared (Oleg primary, Claude assist)
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.2
 sources: []
 depends_on: []
 referenced_by:
@@ -300,6 +300,22 @@ These sub-questions surfaced when the parent decisions (OQ-013, 014, 015, 018) w
 - **Resolution criteria:** revisit at G4. If Phase 1 manual burden is becoming the bottleneck during M2 or M3, accelerate to "concurrent with M3" or "M3.5". Otherwise, post-G4.
 - **Cross-references:** [ADR-026](DECISIONS.md#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface), [TASK_REGISTRY](../../TASK_REGISTRY.md), [OQ-028](#oq-028--which-agentic-memory-framework--tooling-for-l0l1).
 
+### OQ-030 — Which btest interpreter does blive call for `TimingPortfolio` (and other non-LongShort archetypes)?
+
+- **status:** IN_DISCUSSION (default proposed below; surface for confirmation at G2 review)
+- **opened:** 2026-04-27 · **target_resolution:** G2 gate
+- **depends_on:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import); [KB-1 §6, §7](../kb/btest_dsl_inventory.md)
+- **Background:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) commits blive to importing `FactorEngine`, `SignalEngine`, `PortfolioEngine` from btest. M1 work surfaced two facts:
+  1. `PortfolioEngine` is a free function `compute_target_weights_for_date()` (not a class), and it only handles `LongShortPortfolio`.
+  2. The Phase 1 strategy (`tkan_v4_momentum_timing`) uses `TimingPortfolio`, which btest interprets via `quantdsl_backtest.runners.single_asset.SingleAssetRunner` — a different module that bundles factor evaluation, signal evaluation, and position derivation in one batch interpreter, **not** the three engines named in ADR-010.
+- **Options:**
+  1. **Call `SingleAssetRunner` from blive's pipeline** for `TimingPortfolio`-based strategies; call `FactorEngine + SignalEngine + compute_target_weights_for_date` for `LongShortPortfolio`-based strategies. Each archetype maps to its native btest interpreter. (Working default for M1.)
+  2. **Reimplement TimingPortfolio's logic inside blive** as a streaming-friendly evaluator that sits alongside FactorEngine/SignalEngine. Closer to ADR-010's prose but introduces the very drift ADR-010 was meant to prevent.
+  3. **Extend btest's engine package** to expose a `TimingPortfolioEngine` matching the LongShort one. Upstream change; cross-project coordination cost.
+- **Proposed default (working answer for M1):** Option 1. The Strategy Loader inspects `strategy.portfolio` type and the M1 pipeline dispatches to the appropriate btest interpreter. ADR-010's spirit — reuse btest's engines, don't fork — is preserved; the prose's "three engines" is a partial enumeration that needs amendment when this OQ resolves.
+- **Resolution criteria:** at G2 review, decide whether to (a) amend ADR-010 prose to acknowledge `SingleAssetRunner` and any future archetype-specific interpreters, (b) advocate Option 3 with btest, or (c) keep ADR-010 unchanged and treat the dispatch as an undocumented but stable pattern. Plus: confirm `LongShortPortfolio` archetype works under the same M1 pipeline shape when Phase 3 (`lagging_indecies`) lands at M7.
+- **Cross-references:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import); [KB-1 §6, §7](../kb/btest_dsl_inventory.md); [`runners/single_asset.py`](`btest/src/quantdsl_backtest/runners/single_asset.py`); M0 retro recommendation 1; M1 work this session.
+
 ---
 
 ## Section C — Index by status
@@ -332,6 +348,7 @@ OQ-017 — Triple Leveraged ETF instrument set is `{TQQQ, TMF, IEF}`.
 | OQ-012 | Parity tolerance bands | calibrate at M7 |
 | OQ-023 | ForgeFolio integration | post-M8 |
 | OQ-028 | Agentic memory framework / tooling for L0+L1 | before L0+L1 implementation |
+| OQ-030 | btest interpreter dispatch for non-LongShort archetypes | G2 review |
 | OQ-029 | Timing of L0+L1 implementation | at or before G4 gate |
 
 ### IN_DISCUSSION (have a working default in REQUIREMENTS §16; ADRs not yet written)
