@@ -193,6 +193,17 @@ class LiveStrategyConfig(_BliveModel):
     strategy_module: str
     build_strategy_kwargs: Mapping[str, Any] = Field(default_factory=dict)
     nav_slice: Decimal
+    # ADR-034: declare which broker the strategy runs against. Defaults to
+    # "paper" for backward compatibility with M0 / M1 tests; new
+    # IG (M2-IG) / IB (M2-IB resumption) strategies declare explicitly.
+    broker: Literal["paper", "ig", "ib"] = "paper"
+    # Per-broker config blocks (ADR-034 §"Decision" item 1). Concrete shapes
+    # filled in by each broker's package — IG at M2-IG.3 (`ig_config`), IB
+    # at M2-IB resumption (`ib_config`). Only the block matching the
+    # selected `broker` is consulted; others are accepted-and-ignored.
+    paper_config: Mapping[str, Any] | None = None
+    ig_config: Mapping[str, Any] | None = None
+    ib_config: Mapping[str, Any] | None = None
     live_overrides: LiveOverrides = Field(default_factory=LiveOverrides)
     live_borrow_provider: LiveBorrowProvider | None = None
     live_financing_provider: LiveFinancingProvider | None = None

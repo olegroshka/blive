@@ -4,7 +4,7 @@ title: Ports & Adapters
 status: STABLE
 owner: Claude
 last_reviewed: 2026-04-27
-version: 0.2
+version: 0.3
 sources:
   - REQUIREMENTS.md §7.2 (Port signatures)
   - DD-1 §1, §2 (types referenced in signatures)
@@ -144,18 +144,21 @@ land in.
 
 | Adapter | Module | Status | Milestone | Notes |
 |---------|--------|--------|-----------|-------|
-| `PaperBroker` | `blive.adapters.paper.broker` | M0 in flight | M0 | in-process matcher; deterministic fills; no IB wire |
-| `IBBroker` (read) | `blive.adapters.ib.broker` | MISSING | M2 | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events` |
-| `IBBroker` (write) | `blive.adapters.ib.broker` | MISSING | M3 | `submit`, `cancel`, `replace`; full FSM via callbacks |
+| `PaperBroker` | `blive.adapters.paper.broker` | STABLE (M0+M1) | M0 | in-process matcher; deterministic fills; no wire. Resolved via [`broker_registry.get_broker("paper", …)`](../../src/blive/runtime/broker_registry.py) per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004). |
+| `IBBroker` (read) | `blive.adapters.ib.broker` | MISSING — **PARKED 2026-04-27** | M2-IB | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Substrate at `M2-substrate-IB.checkpoint`; resumes when IB Paper account reopens. |
+| `IBBroker` (write) | `blive.adapters.ib.broker` | MISSING — **PARKED 2026-04-27** | M3 | `submit`, `cancel`, `replace`; full FSM via callbacks. |
+| `IGBroker` (read) | `blive.adapters.ig.broker` | MISSING | **M2-IG.3** | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Auth via 3-step REST per [ADR-036](../decisions/DECISIONS.md#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer); rate-limited via `blive.adapters.shared.rate_limiter` with [ADR-038](../decisions/DECISIONS.md#adr-038--ig-rate-limit-defaults-parameterise-adr-031) defaults. |
+| `IGBroker` (write) | `blive.adapters.ig.broker` | MISSING | **M2-IG.4** | `submit`, `cancel`, `replace`; FSM driven by Lightstreamer trade subscription. |
 | `MockBroker` (test-only) | `tests/conftest.py` | M0 | M0 | minimal stub for unit tests not exercising round-trip |
 
 ### 2.2 `MarketDataPort` adapters
 
 | Adapter | Module | Status | Milestone |
 |---------|--------|--------|-----------|
-| `PaperMarketData` (deterministic-fixture) | `blive.adapters.paper.market_data` | M1 implemented | M1 |
-| `IBMarketData` | `blive.adapters.ib.market_data` | MISSING | M2 |
-| `EODHDMarketData` | `blive.adapters.eodhd.market_data` | MISSING | M2 |
+| `PaperMarketData` (deterministic-fixture) | `blive.adapters.paper.market_data` | STABLE (M1) | M1 |
+| `IBMarketData` | `blive.adapters.ib.market_data` | MISSING — **PARKED 2026-04-27** | M2-IB |
+| `IGMarketData` | `blive.adapters.ig.market_data` | MISSING | **M2-IG.3** (Lightstreamer + REST historical per [ADR-036](../decisions/DECISIONS.md#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer)) |
+| `EODHDMarketData` | `blive.adapters.eodhd.market_data` | MISSING — **PARKED 2026-04-27** | M2-IB (warm-up role; deferred with M2-IB) |
 
 ### 2.3 `ClockPort` adapters
 
@@ -186,15 +189,26 @@ land in.
 | `InMemoryEventBus` | `blive.adapters.memory.bus` | M0 in flight | M0 |
 | `RedisStreamsEventBus` | `blive.adapters.redis.bus` | MISSING | post-M8 (opt-in per [ADR-007](../decisions/DECISIONS.md#adr-007--in-process-event-bus-for-v1)) |
 
-## 3. The hexagonal contract (ADR-004)
+## 3. The hexagonal contract (ADR-004 + ADR-034)
 
 The domain does not import from adapters. Enforced by the import-linter
 contract `Domain layer is broker-neutral` in `pyproject.toml` (added at M0).
+
+**Per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004), strategy / sizing / risk code does not import broker-specific adapters either** — they go through [`blive.runtime.broker_registry`](../../src/blive/runtime/broker_registry.py), the single dispatch site allowed to import from `blive.adapters.{paper,ig,ib}.*`. Enforced by the import-linter contract `Broker registry isolation (ADR-034)` in `pyproject.toml` (added at M2-IG.2). Cross-cutting helpers under `blive.adapters.{shared,clock,memory,alert}` remain freely importable.
 
 **Adapters depend on the domain via Protocols.** Each adapter's tests
 verify it implements the Port contract and behaves correctly under chaos
 fixtures (the chaos fixtures themselves arrive in KB-7, MISSING, drafted at
 M3 from observed behaviour).
+
+## 3.1 Cross-cutting shared adapters (`blive.adapters.shared.*`)
+
+Per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) §"Decision" item 3, modules used by more than one broker live under `blive.adapters.shared`. Currently:
+
+| Module | Owns | Source ADR |
+|---|---|---|
+| `blive.adapters.shared.rate_limiter` | broker-agnostic token-bucket; named-bucket `RateLimitConfig` consumed per-broker | [ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) + [ADR-038](../decisions/DECISIONS.md#adr-038--ig-rate-limit-defaults-parameterise-adr-031) |
+| `blive.adapters.shared.credentials` | env-var + `~/.blive/secrets/{broker}.env` loader; per-broker `CredentialSchema`; redaction-list helper | [ADR-035](../decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) |
 
 ## 4. Cross-References
 
@@ -213,3 +227,4 @@ None blocking M0; richer signatures will be needed when M2/M3 adapters land.
 
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. Ports lifted from REQUIREMENTS §7.2; adapter status reflects M0 plan.
 - **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `PaperMarketData` (§2.2) and `LogAlert` (§2.5) landed; `PaperBroker.replace()` (§2.1) now in-place per ADR-029-paired follow-up. M2-tier adapters remain MISSING. Port Protocol surfaces unchanged from v0.1.
+- **v0.3 (2026-04-27)** — M2-IG.2 amendment. §2.1 / §2.2 adapter trackers grew IG (read M2-IG.3 / write M2-IG.4) rows and explicit "PARKED 2026-04-27" markers on the IB / EODHD rows. §3 hexagonal-contract section now references [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) and the new `Broker registry isolation` import-linter contract. New §3.1 catalogues cross-cutting shared adapters under `blive.adapters.shared.*` (rate limiter, credentials loader). Port Protocol surfaces unchanged.

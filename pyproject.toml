@@ -112,3 +112,24 @@ name = "RiskEngine no-bypass (ADR-008) — placeholder"
 type = "forbidden"
 source_modules = ["blive.domain"]
 forbidden_modules = ["blive.platform_api", "blive.platform_ui"]
+
+[[tool.importlinter.contracts]]
+# Per ADR-034: only blive.runtime.broker_registry may import broker-specific
+# adapter packages outside blive.adapters.*. Strategy / Sizer / RiskEngine
+# (and any future domain-adjacent component) must resolve a broker via the
+# registry rather than reaching into adapters directly. The registry's own
+# imports of blive.adapters.{paper,ig,ib} are the intentional load-bearing
+# exception. blive.adapters.{clock,memory,alert,shared} are cross-cutting
+# helpers and remain freely importable.
+name = "Broker registry isolation (ADR-034)"
+type = "forbidden"
+source_modules = [
+  "blive.strategy",
+  "blive.sizing",
+  "blive.risk",
+]
+forbidden_modules = [
+  "blive.adapters.paper",
+  "blive.adapters.ig",
+  "blive.adapters.ib",
+]

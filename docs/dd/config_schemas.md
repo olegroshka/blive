@@ -4,7 +4,7 @@ title: Config Schemas
 status: DRAFT
 owner: Claude
 last_reviewed: 2026-04-27
-version: 0.1
+version: 0.2
 sources:
   - REQUIREMENTS.md §5.1, §5.10, §5.12, §5.13
   - ADR-028 (strategy config shape)
@@ -64,6 +64,10 @@ The contents of `~/.blive/strategies/{strategy_id}/live.yaml`. One file per stra
 | `strategy_module` | `str` | (required) | dotted Python path | e.g. `btest.strategies.tkan_v4_momentum_timing`; module must expose `build_strategy(**kwargs) -> Strategy` per [REQUIREMENTS §5.13](../../REQUIREMENTS.md) |
 | `build_strategy_kwargs` | `Mapping[str, Any]` | `{}` | JSON-serialisable | keyword arguments forwarded to `build_strategy(**kwargs)` |
 | `nav_slice` | `Decimal` | (required) | `0 < x ≤ 0.10` | fraction of account NAV; cap of 0.10 enforced per [ADR-020](../decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10) |
+| `broker` | `Literal["paper", "ig", "ib"]` | `"paper"` | one of the literal members | which broker the strategy runs against. Per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004); resolved by [`blive.runtime.broker_registry.get_broker(name, ...)`](../../src/blive/runtime/broker_registry.py). Defaults to `"paper"` for backward compatibility with M0 / M1 strategies — new IG (M2-IG) / IB (M2-IB resumption) strategies declare explicitly. |
+| `paper_config` | `Mapping[str, Any] \| None` | `None` | JSON-serialisable when set | per-broker config block consumed when `broker == "paper"`. M2-IG.2 leaves the schema open; concrete fields (e.g. `commission_per_share`, `starting_cash`) lock at the next paper-mode work session that needs them. Other-broker config blocks are accepted-and-ignored. |
+| `ig_config` | `Mapping[str, Any] \| None` | `None` | JSON-serialisable when set | per-broker config block consumed when `broker == "ig"`. Schema concrete at M2-IG.3 alongside the IG read-side adapter; expected keys include `epic_overrides`, `lightstreamer_url`, etc. |
+| `ib_config` | `Mapping[str, Any] \| None` | `None` | JSON-serialisable when set | per-broker config block consumed when `broker == "ib"`. Schema concrete when M2-IB resumes from `M2-substrate-IB.checkpoint`; expected keys include `host`, `port`, `client_id`. |
 | `live_overrides` | `LiveOverrides` | (default-constructed) | — | execution-level overrides (§2) |
 | `live_borrow_provider` | `LiveBorrowProvider \| None` | `None` | — | overlays `Strategy.costs.live_borrow_provider` if set (§3) |
 | `live_financing_provider` | `LiveFinancingProvider \| None` | `None` | — | overlays `Strategy.costs.live_financing_provider` if set (§4) |
@@ -218,3 +222,4 @@ None blocking M1. Future:
 ## Changelog
 
 - **v0.1 (2026-04-27)** — initial DRAFT at M1. Locks the YAML schema for `LiveStrategyConfig` and its sub-objects per ADR-028; surfaces the M1 RC subset for `RiskOverrides` with M4 forward-compat for the rest.
+- **v0.2 (2026-04-27)** — M2-IG.2 amendment per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004). §1 grew four new fields on `LiveStrategyConfig`: `broker` (`Literal["paper","ig","ib"]`, default `"paper"` for backward compat) plus optional per-broker config blocks `paper_config`, `ig_config`, `ib_config`. Existing M1 YAMLs continue to validate without modification; new strategies should declare `broker` explicitly. Concrete schemas for `ig_config` and `ib_config` lock at their respective code milestones (M2-IG.3 / M2-IB resumption). Status stays DRAFT — change is purely additive but the artefact has not yet been re-reviewed for STABLE flip.
