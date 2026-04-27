@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-04-27
-version: 0.5
+version: 0.6
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -59,6 +59,10 @@ referenced_by:
 | [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) | Sizer rounding policy: integer shares, truncate toward zero | ACCEPTED | 2026-04-27 | — |
 | [ADR-028](#adr-028--strategy-config-shape-python-build_strategy--blive-yaml-overrides) | Strategy config shape: Python `build_strategy()` + blive YAML overrides | ACCEPTED | 2026-04-27 | — |
 | [ADR-029](#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet) | `PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet | ACCEPTED | 2026-04-27 | — |
+| [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) | Per-archetype btest interpreter dispatch (amends ADR-010) | PROPOSED | 2026-04-27 | OQ-030 |
+| [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) | Token-bucket rate limiter shape for IB adapters | PROPOSED | 2026-04-27 | — |
+| [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) | Instrument resolution policy (`blive.Instrument` ↔ IB `Contract` / `ConID`) | PROPOSED | 2026-04-27 | — |
+| [ADR-033](#adr-033--accountupdate-event-shape-and-sampling-cadence) | `AccountUpdate` event shape and sampling cadence | PROPOSED | 2026-04-27 | — |
 
 ---
 
@@ -1073,6 +1077,226 @@ The adapter is the M1 substrate-level placeholder slot already declared in [INV-
 
 ---
 
+## ADR-030 — Per-archetype btest interpreter dispatch (amends ADR-010)
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** [OQ-030](OPEN_QUESTIONS.md#oq-030--which-btest-interpreter-does-blive-call-for-timingportfolio-and-other-non-longshort-archetypes)
+
+### Context
+
+[ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) commits blive to importing btest's "FactorEngine, SignalEngine, PortfolioEngine" rather than forking. M1 implementation surfaced two facts that ADR-010's prose does not capture:
+
+1. `PortfolioEngine` is a **free function** (`compute_target_weights_for_date()` in `quantdsl_backtest.engine.portfolio_engine`), not a class, and it only handles `LongShortPortfolio`.
+2. `TimingPortfolio` strategies — including the Phase 1 `tkan_v4_momentum_timing` 1× — are interpreted by `quantdsl_backtest.runners.single_asset.SingleAssetRunner`, a separate module that bundles factor evaluation, signal evaluation, and position derivation in one batch interpreter. This is **not** the three-engine composition ADR-010 names.
+
+ADR-010's spirit ("reuse btest's strategy semantics, do not fork") is preserved — but its enumeration is incomplete, and the M1 paper pipeline already dispatches by archetype. [OQ-030](OPEN_QUESTIONS.md#oq-030--which-btest-interpreter-does-blive-call-for-timingportfolio-and-other-non-longshort-archetypes) captured this gap with a working default and three resolution options.
+
+### Decision
+
+Adopt **per-archetype dispatch** as the canonical interpretation pattern between blive and btest, codified at the strategy-loader / runtime boundary. The dispatch table for v1:
+
+| `strategy.portfolio` archetype | btest interpreter surface | blive call site |
+|---|---|---|
+| `LongShortPortfolio` | `FactorEngine` + `SignalEngine` + `compute_target_weights_for_date()` | M2+; not exercised at M1 (no LongShort strategy in Phase 1) |
+| `TimingPortfolio` | `quantdsl_backtest.runners.single_asset.SingleAssetRunner.run(price_close=...)` | `blive.runtime.paper_pipeline` (M1); same path in IB-paper / live (M3+) |
+
+Future archetypes (multi-instrument timing, basket rotation, etc.) register a new row when they land. Unrecognised archetypes raise `NotImplementedError` at strategy-load time, naming the archetype and pointing here.
+
+ADR-010 stays ACCEPTED — its spirit holds; this ADR amends only the *enumeration of interpreters* as a complementary record, per [CONTEXT_PROTOCOL §2.5](../../CONTEXT_PROTOCOL.md) (decision log is append-only; we do not edit ADR-010's body).
+
+### Alternatives Considered
+
+1. **Reimplement `TimingPortfolio` inside blive** as a streaming evaluator. Rejected: reintroduces the drift ADR-010 was meant to prevent; ADR-012's parity contract becomes much harder to keep.
+2. **Extend btest** to expose a class-shaped `TimingPortfolioEngine`. Rejected for v1: cross-project coordination cost; doesn't match how btest already structures runners; nothing forces a uniform shape across archetypes.
+3. **Keep ADR-010 unchanged and treat dispatch as undocumented**. Rejected: leaves M2+ authors guessing; M1 retro already flagged this; phantom-decision anti-pattern ([CONTEXT_PROTOCOL §3.5](../../CONTEXT_PROTOCOL.md)).
+
+### Consequences
+
+- **Positive:** explicit dispatch table; new archetypes have a named home; M2+ adapter authors know where to plug in; ADR-010's spirit preserved.
+- **Negative:** the table grows as archetypes land; small upstream-drift risk — mitigated by `tests/contracts/test_btest_imports.py` smoke-import contract.
+- **Follow-ups:**
+  - **KB-1 §6** prose (btest engines section) is now incomplete; an editorial pass should add one paragraph linking here. Tracked as a CONTEXT_INVENTORY priority-queue item; not a same-commit update because KB-1 lives btest-side and the canonical home is its file.
+  - When M2+ exercises `LongShortPortfolio`, add a smoke test analogous to the `SingleAssetRunner` one in `test_btest_imports.py`.
+  - `SingleAssetRunner` is batch-only ([RETRO-M1](../retros/M1_retrospective.md) "Recommendations"); when M3 introduces per-bar streaming dispatch, revisit the "blive call site" column.
+
+### Cross-References
+
+- [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) — reused-by-import policy (this ADR amends scope, does not supersede).
+- [OQ-030](OPEN_QUESTIONS.md#oq-030--which-btest-interpreter-does-blive-call-for-timingportfolio-and-other-non-longshort-archetypes) — resolved by this ADR.
+- [KB-1 §6](../kb/btest_dsl_inventory.md) — btest engines section (forward-update follow-up).
+- [`blive.runtime.paper_pipeline`](../../src/blive/runtime/paper_pipeline.py) — M1 dispatch site.
+- [`tests/contracts/test_btest_imports.py`](../../tests/contracts/test_btest_imports.py) — smoke-import contract.
+- [RETRO-M1](../retros/M1_retrospective.md) — "Surprises" raised this question.
+
+---
+
+## ADR-031 — Token-bucket rate limiter shape for IB adapters
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[REQUIREMENTS §10 gotcha 1](../../REQUIREMENTS.md#10-ib-specific-gotchas-must-be-first-class-in-adapter) and [KB-3 §1](../kb/ib_pacing_spec.md#1-the-50-msgsec-client-throttle) require the IB adapter to throttle outbound calls below IB's 50 msg/sec hard cap (3 violations terminate the session). [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults) sets defaults: 20 msg/sec global ceiling; 5 msg/sec per-strategy ceiling (also [INV-4 RC-05/RC-06](../inv/risk_checks.md)). The rate limiter is the **first M2 code module** because it sits beneath both `IBBroker` and `IBMarketData`, and the G3 throttle test ("burst of 60 calls/sec; outbound rate stays ≤ 20 msg/sec") is the gate criterion.
+
+Three algorithm options exist (token bucket, leaky bucket, sliding window) and three accounting choices (global only, per-strategy only, both).
+
+### Decision
+
+- **Algorithm:** **token bucket**, refilled at a constant rate. Two-level: a **global** bucket (default capacity = 20 tokens, refill = 20/s) and **per-strategy** sub-buckets (default capacity = 5 tokens, refill = 5/s). A call requires one token from the strategy bucket *and* one from the global bucket; if either is empty, the caller awaits until both refill.
+- **Awaiting semantics:** the limiter's public method is `async def acquire(strategy_id: str) -> None`, blocking until both tokens are available. Caller never sees a rejection from the limiter — back-pressure flows through asyncio. The IB-side error code 100 ("max rate exceeded") is therefore *defence-in-depth*, not the primary throttle.
+- **Clock source:** [`ClockPort`](../inv/ports_adapters.md#13-clockport). Tests use [`SimClock`](../../src/blive/adapters/clock/sim.py) to advance time deterministically.
+- **Persistence:** in-memory only. Counters reset on process restart, which matches IB's view (the 50 msg/sec window resets on reconnect anyway). No SQLite row.
+- **Configurability:** thresholds passed to constructor; defaults from [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults). Per-strategy override admitted via `RiskOverrides.max_orders_per_sec_strategy` at M4 ([INV-4 RC-05](../inv/risk_checks.md), forward-compat ignored at M2).
+- **Module location:** `blive.adapters.ib.rate_limiter` — adapter-side, not domain-side. The domain has no rate-limit concept; this is purely how blive throttles its own outbound traffic to honour IB's contract.
+- **Public surface:** `class TokenBucketRateLimiter`, with `acquire(strategy_id)`, `set_global_rate(...)`, `set_strategy_rate(...)`, plus a `metrics()` accessor for observability ([REQUIREMENTS §5.9](../../REQUIREMENTS.md): "IB throttle headroom" Prometheus gauge).
+
+### Alternatives Considered
+
+1. **Leaky bucket.** Equivalent throughput shape, but the two-level composition is awkward — leaky-bucket models smoothing, not budgeting. Token bucket maps cleanly to IB's "messages per second" budget.
+2. **Sliding window.** Exact 1-second window; precise but storage-heavy (per-call timestamps); marginal benefit over token bucket at our message volumes.
+3. **Global only (no per-strategy).** Rejected: violates [INV-4 RC-05](../inv/risk_checks.md) "≤ 5/sec per strategy" requirement; leaves a single misbehaving strategy able to consume the whole 20-token budget.
+4. **Per-strategy only (no global).** Rejected: doesn't directly defend against the 50-msg/sec hard cap if many strategies fire simultaneously.
+
+### Consequences
+
+- **Positive:** simple, well-understood algorithm; deterministic via `ClockPort` for tests; pure-Python; no IB dependency (testable without the wire).
+- **Positive:** the G3 throttle test (`burst of 60 calls/sec` → `≤ 20 msg/sec sustained`) becomes a unit test that runs in milliseconds with `SimClock`.
+- **Negative:** two-level token bucket has slightly more state than a single counter; mitigated by simple internal structure (`dict[strategy_id, Bucket]`).
+- **Negative:** the limiter does not back-pressure data-flow producers (e.g. `subscribe_bars`) — those are read-side IB callbacks, not outbound calls. Read-side flow control (if needed) is a separate concern.
+- **Follow-ups:**
+  - Prometheus gauge `blive_ib_throttle_headroom` populated from `metrics()` at M7.
+  - When IB's hard cap changes (rare, but not unprecedented), bump the global default via [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults).
+  - The `set_strategy_rate(...)` path is the integration point with [DD-3 §7 RiskOverrides](../dd/config_schemas.md#7-riskoverrides) when M4 widens that section.
+
+### Cross-References
+
+- [REQUIREMENTS §10 gotcha 1](../../REQUIREMENTS.md#10-ib-specific-gotchas-must-be-first-class-in-adapter), [§5.5 (rate limits)](../../REQUIREMENTS.md), [§5.9 (observability)](../../REQUIREMENTS.md).
+- [KB-3 §1](../kb/ib_pacing_spec.md#1-the-50-msgsec-client-throttle), [§9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults).
+- [INV-4 RC-05, RC-06](../inv/risk_checks.md) — order-rate risk checks (full set lands at M4).
+- [INV-6 §1.3](../inv/ports_adapters.md#13-clockport) — `ClockPort`.
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2 deliverable 4 — `IBBroker` adapter (consumer of this limiter).
+
+---
+
+## ADR-032 — Instrument resolution policy: blive Instrument ↔ IB Contract
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[DD-1 §2.1](../dd/domain_objects.md#21-instrument) defines `Instrument(symbol, venue, currency, asset_class, multiplier)` as the broker-neutral identity. The IB adapter must map this to an `ib_async.Contract` (and, internally, an integer `ConID`). [KB-2 §2](../kb/ib_capability_matrix.md#2-asset-classes) notes "`Contract` resolution is by `ConID` (an integer IB ID); blive's `Instrument` ↔ `Contract` mapping happens in `IBBroker` and is documented in DD-7 (MISSING)." DD-7 is the deferred MISSING artefact this ADR's design feeds into.
+
+Three concerns: the field-level mapping; the ConID lookup mechanism + caching strategy; behaviour when `qualifyContracts()` returns multiple candidates (ambiguous symbology, e.g. `AAPL` on multiple exchanges).
+
+### Decision
+
+- **secType mapping:** `AssetClass.EQUITY` → `STK`; `AssetClass.ETF` → `STK` (IB does not distinguish ETFs from equities at secType); `AssetClass.INDEX` → `IND`; `AssetClass.FX` → `CASH`; `AssetClass.FUTURE` → `FUT`; `AssetClass.OPTION` → `OPT`. Unsupported asset classes raise `InstrumentNotResolvable` at the adapter boundary (don't reach the wire).
+- **Field carry-through:** `symbol`, `currency` map directly. `venue` (MIC code, e.g. `XPAR`) maps to `ib_async.Contract.exchange` (e.g. `SBF`); the mapping is via a small static table (`MIC_TO_IB_EXCHANGE`) in the adapter, sourced from [KB-2 §5](../kb/ib_capability_matrix.md#5-routing). For Phase 1 the table only needs `XPAR → SBF`; new venues add rows.
+- **ConID resolution:** lazy, on first use per Instrument. Call `ib.qualifyContractsAsync(contract)`; on success, cache `(Instrument → conId)` in memory keyed by full `Instrument` tuple equality.
+- **Cache TTL:** process lifetime. `ConID`s are stable for non-corp-action instruments; corp actions (rare) invalidate the lookup, which is detected by IB returning a different conId or by an explicit `clear_cache(instrument)` call wired into M5 reconciliation.
+- **Ambiguity:** when `qualifyContractsAsync()` returns >1 candidate (or `>1` after primaryExchange filter), raise `InstrumentAmbiguous(instrument, candidates)` with each candidate's `(conId, primaryExchange, currency)` listed. **Never silently pick one.** The caller must resolve via a more specific `Instrument` (typically by setting `venue` to the primary exchange MIC).
+- **Module location:** `blive.adapters.ib.instrument_resolver` — pure adapter concern, not in the domain.
+- **DD-7 publication:** this ADR's mapping table + cache contract are the DD-7 v0.1 substrate. DD-7 lands DRAFT in this commit batch; it goes STABLE when the M2 IBBroker exercises the path against IB Paper.
+
+### Alternatives Considered
+
+1. **Eager resolution at Instrument construction.** Rejected: would require IB connection at strategy-load time, violating layer purity ([ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement)) — domain code constructs `Instrument`s.
+2. **Cache to disk.** Rejected for v1: ConIDs are cheap to re-resolve (one `qualifyContracts` round trip per instrument per process); persistence adds invalidation surface.
+3. **Auto-disambiguate by primary exchange heuristic.** Rejected: the symbology surprises IB sometimes throws (e.g. a fund with the same ticker on two MICs) deserve an explicit error so the operator picks correctly.
+4. **Bind `Instrument` directly to `ib_async.Contract`.** Rejected: breaks broker-neutrality; the `Instrument` would no longer round-trip to non-IB adapters (e.g. `EODHDDataSource`).
+
+### Consequences
+
+- **Positive:** clean broker-neutral identity; explicit ambiguity errors surface at the boundary; cache is in-process only (no persistence surface).
+- **Negative:** the static MIC↔IB-exchange table is a substrate that drifts if IB renames a routing destination; pinned to KB-2 §5 with date-accessed citations.
+- **Negative:** a fresh process re-resolves every instrument once; for Phase 1 (1 instrument) this is one round trip on startup — negligible; for many-instrument strategies the warm-up cost is bounded by [KB-3 §2](../kb/ib_pacing_spec.md#2-historical-data-pacing) historical-data pacing already.
+- **Follow-ups:**
+  - DD-7 STABLE flip when M2 IBBroker exercises the path successfully against IB Paper.
+  - `clear_cache(instrument)` accessor wired into M5 reconciliation when corp-action handling lands.
+  - The `MIC_TO_IB_EXCHANGE` table grows with each new venue (Phase 2/3 US equities → `XNAS`/`XNYS`/`ARCA` → `NASDAQ`/`NYSE`/`ARCA`).
+
+### Cross-References
+
+- [DD-1 §2.1](../dd/domain_objects.md#21-instrument) — `Instrument` shape.
+- [KB-2 §2, §5](../kb/ib_capability_matrix.md) — IB asset classes + routing.
+- [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) — broker-neutrality.
+- [`docs/dd/instrument_dictionary.md`](../dd/instrument_dictionary.md) — DD-7 (DRAFT, this commit).
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2 substrate transitions — DD-7 MISSING → DRAFT.
+
+---
+
+## ADR-033 — `AccountUpdate` event shape and sampling cadence
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[INV-5](../inv/domain_events.md) catalogues `account.update` (M2 row) carrying an `AccountSnapshot` payload, with consumers "persistence (subsampled), UI". [REQUIREMENTS §6.5](../../REQUIREMENTS.md#65-data-retention) implies a 30 s sampling cadence for snapshots. `ib_async`'s `accountValuesEvent` fires on every IB push (potentially many times per second across many fields), so blive needs to define normalisation + cadence so the event bus is not flooded.
+
+Two sub-decisions: (1) **payload** — what fields land in the emitted event; (2) **cadence** — how often blive emits.
+
+### Decision
+
+- **Payload type:** `AccountUpdate(snapshot: AccountSnapshot, time_utc: datetime)`. Reuses the existing [DD-1 §2.8](../dd/domain_objects.md#28-accountsnapshot) `AccountSnapshot` dataclass — no new fields. The wrapper carries a topic-friendly type identity for [INV-5](../inv/domain_events.md) and the `DomainEvent` union.
+- **Cadence:** **30-second wall-clock subsample, with diff-suppress.** Internally the IB adapter accumulates the latest values from `accountValuesEvent`; a periodic 30-s task takes a snapshot, compares against the previously emitted one, and emits only when at least one field changed by more than its per-field threshold. Default thresholds:
+
+  | Field | Threshold for emission |
+  |---|---|
+  | `equity` | ≥ 0.01 currency unit |
+  | `cash_by_ccy[ccy]` | ≥ 0.01 currency unit |
+  | `buying_power` | ≥ 0.01 currency unit |
+  | `gross_exposure`, `net_exposure` | ≥ 0.01 currency unit |
+  | `leverage` | ≥ 0.001 (3 d.p.) |
+  | `margin_used` | ≥ 0.01 currency unit |
+
+  Below threshold, no event; the next 30-s tick re-evaluates against the latest emission.
+
+- **Persistence:** event-log append per [INV-5 §3](../inv/domain_events.md#3-persistence-ordering-rule) ordering rule (persist before publish). M4 SQLite tables will store full history; M1 in-memory persistence keeps the latest N for the UI (N=2,880 = 24h at 30-s cadence).
+- **Subscription model:** the IB adapter calls `ib.reqAccountUpdates(True, accountId)` on connect; the 30-s timer is internal to `IBBroker.account_snapshot()` polling — `account_snapshot()` returns synchronously from cached state, the timer task is what produces emitted events.
+- **Module location:** `blive.domain.events.AccountUpdate` (the dataclass — sits with the other domain events) + emission timer in `blive.adapters.ib.broker`.
+
+### Alternatives Considered
+
+1. **Emit every IB push.** Rejected: floods the event bus with tens of events per second of essentially the same state; [REQUIREMENTS §11](../../REQUIREMENTS.md) "event volume bounded by trade frequency, not market data" framing breaks.
+2. **Emit on demand (no timer; only when a consumer calls `account_snapshot()`).** Rejected: misses the "periodic 30-s sample" framing of [REQUIREMENTS §6.5](../../REQUIREMENTS.md); UI dashboard wouldn't update without a polling consumer.
+3. **Emit on every change, no thresholds.** Rejected: floating-point oscillation in `leverage` / `gross_exposure` would emit no-op events; the diff-suppress is cheap insurance.
+4. **Vary the cadence per-field** (e.g. `buying_power` every push, `leverage` every minute). Rejected as premature; one cadence keeps the implementation simple and the diff-suppress thresholds carry the load.
+
+### Consequences
+
+- **Positive:** bounded event-bus load (≤ 1 emit per 30 s per account); UI dashboard refreshes at predictable cadence; no new domain types beyond a slim wrapper.
+- **Positive:** `AccountSnapshot` reuse means the existing invariants ([DD-1 §2.8](../dd/domain_objects.md#28-accountsnapshot)) carry over.
+- **Negative:** a sudden large change between 30-s ticks is observed at most 30 s late; acceptable for v1 (the dashboard is monitoring, not control).
+- **Negative:** thresholds are per-currency-unit and may need scaling for high-NAV accounts; revisit at M7 with observed real-account behaviour.
+- **Follow-ups:**
+  - DD-2 row added in this commit batch.
+  - When IB pushes `pnlSingle` / `pnl` events (per-position PnL), wire those into the same cadence as a separate `PnLUpdate` event family — out of M2 scope; flagged for M5 reconciliation.
+
+### Cross-References
+
+- [INV-5](../inv/domain_events.md#1-event-catalogue) — `account.update` row (M2).
+- [DD-1 §2.8](../dd/domain_objects.md#28-accountsnapshot) — `AccountSnapshot` payload.
+- [DD-2](../dd/event_schemas.md) — DRAFT in this commit; carries the field-level dictionary for `AccountUpdate`.
+- [REQUIREMENTS §6.5](../../REQUIREMENTS.md#65-data-retention), [§11](../../REQUIREMENTS.md).
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2 substrate transitions — INV-5 widens with `AccountUpdate`.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1080,3 +1304,4 @@ The adapter is the M1 substrate-level placeholder slot already declared in [INV-
 - **v0.3 (2026-04-26)** — added ADR-024 (RETRO artefact type) and ADR-025 (protocol amendment for milestone-close + phase-boundary handoff rules).
 - **v0.4 (2026-04-26)** — added ADR-026 (agentic-execution layer; human-governance / agent-execution division of labour; five-layer adoption stack).
 - **v0.5 (2026-04-27)** — added ADR-027 (Sizer rounding policy: integer shares, truncate toward zero), ADR-028 (Strategy config shape: Python `build_strategy()` + blive YAML overrides), ADR-029 (`PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet) — drafted PROPOSED, accepted by operator same day; status flipped to ACCEPTED for all three.
+- **v0.6 (2026-04-27)** — added ADR-030 (per-archetype btest interpreter dispatch; resolves OQ-030; amends ADR-010 prose), ADR-031 (token-bucket rate limiter shape for IB adapters), ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`), ADR-033 (`AccountUpdate` event shape and 30-s diff-suppressed cadence). All four PROPOSED at M2 entry; awaiting operator review before flip to ACCEPTED.

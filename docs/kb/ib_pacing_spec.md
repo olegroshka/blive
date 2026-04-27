@@ -3,8 +3,8 @@ id: KB-3
 title: IB Pacing & Limits Spec
 status: DRAFT
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.1.1
 sources:
   - https://interactivebrokers.github.io/tws-api/order_limitations.html      # accessed 2026-04-26
   - https://interactivebrokers.github.io/tws-api/historical_limitations.html # accessed 2026-04-26
@@ -196,3 +196,4 @@ Concrete numbers the IBBroker adapter ships with (overridable):
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap from IB docs.
+- **v0.1.1 (2026-04-27)** — M2-entry review pass. No amendments needed; the §1 (50 msg/sec), §2 (≤ 60/10min historical, BID_ASK ×2), §3 (market data tiers + reqMktData/reqTickByTickData budgets), §4 (orderId monotonic), §5 (daily/weekly events), §8 (error codes) tables are unchanged from IB sources at session date. The DRAFT → STABLE flip is deferred to M2 close once the [ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter has been exercised against IB Paper (the §9 default budgets become "verified by behaviour" rather than "verified by docs only").

@@ -3,8 +3,8 @@ id: KB-2
 title: IB Capability Matrix
 status: DRAFT
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.1.1
 sources:
   - https://interactivebrokers.github.io/tws-api/introduction.html       # accessed 2026-04-26
   - https://interactivebrokers.github.io/tws-api/order_submission.html   # accessed 2026-04-26
@@ -206,3 +206,4 @@ Operational implications captured in [REQUIREMENTS §10 / §12](../../REQUIREMEN
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap from IB docs.
+- **v0.1.1 (2026-04-27)** — M2-entry review pass. No amendments needed; sources re-verified at IB docs (TWS API + Campus pages + `ib_async` README). The DRAFT → STABLE flip is deferred to M2 close once the IB read-side adapter has exercised the §2 (asset classes), §3 (order types), §4 (TIFs), §5 (routing), and §6 (algos) surfaces against IB Paper.
