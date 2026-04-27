@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-04-27
-version: 0.6
+version: 0.7
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -63,6 +63,8 @@ referenced_by:
 | [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) | Token-bucket rate limiter shape for IB adapters | PROPOSED | 2026-04-27 | — |
 | [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) | Instrument resolution policy (`blive.Instrument` ↔ IB `Contract` / `ConID`) | PROPOSED | 2026-04-27 | — |
 | [ADR-033](#adr-033--accountupdate-event-shape-and-sampling-cadence) | `AccountUpdate` event shape and sampling cadence | PROPOSED | 2026-04-27 | — |
+| [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) | Multi-broker registry pattern (extends ADR-004) | PROPOSED | 2026-04-27 | — |
+| [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) | Secrets handling discipline (`~/.blive/secrets/`) | PROPOSED | 2026-04-27 | — |
 
 ---
 
@@ -1297,6 +1299,154 @@ Two sub-decisions: (1) **payload** — what fields land in the emitted event; (2
 
 ---
 
+## ADR-034 — Multi-broker registry pattern (extends ADR-004)
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (extends [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement))
+- **resolves:** —
+
+### Context
+
+[ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) establishes hexagonal architecture: domain depends only on Ports; adapters implement them. M0+M1 shipped one concrete `BrokerPort` adapter (`PaperBroker`); M2-IB planned a second (`IBBroker`). The 2026-04-27 pivot to an IG demo bridge ([TASK_REGISTRY](../../TASK_REGISTRY.md) M2-IG) introduces a third (`IGBroker`), and the operator's directive — "make sure we have a clean abstraction layer for various broker apis" — asserts that we expect more, not just two.
+
+The hexagonal Pattern alone does not specify:
+
+- How a strategy YAML declares which broker it uses.
+- Where per-broker config lives.
+- How the runtime resolves the broker selection.
+- How adapters discover their configuration.
+- How credentials are loaded (split into [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets)).
+
+These choices are currently implicit (M1 hardcoded `PaperBroker` construction in the test harness). Without explicit substrate, dispatch logic will accumulate as ad-hoc imports + conditionals across `runtime/`, `strategy/`, and `adapters/` — exactly the rot ADR-004 was meant to prevent. Substrate is needed before the second concrete adapter (IG) ships.
+
+### Decision
+
+Adopt a **multi-broker registry pattern**, layered on top of [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement). Concrete shape:
+
+1. **Top-level config field.** [DD-3 §1](../dd/config_schemas.md#1-livestrategyconfig-top-level) gains a required top-level `broker: Literal["paper", "ig", "ib"]` field. Per-broker config blocks are optional sub-objects (`paper_config`, `ig_config`, `ib_config`); only the selected broker's block is read.
+
+2. **Adapter package layout convention.** Each broker adapter family lives at `blive.adapters.{broker_name}`. Required modules per broker:
+   - `broker.py` — the `BrokerPort` implementation (e.g. `IGBroker`, `IBBroker`, `PaperBroker`)
+   - `market_data.py` — the `MarketDataPort` implementation
+   - `instrument_resolver.py` — `Instrument` ↔ broker-specific identity (skip for `paper` which has no native identity)
+   - `credentials.py` — credential schema + load helpers (per [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets); skip for `paper`)
+
+3. **Cross-cutting shared modules.** Pieces used by multiple broker adapters live under `blive.adapters.shared.*`:
+   - `rate_limiter.py` — the [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) token-bucket algorithm, configured per-broker at construction (defaults supplied by each broker's KB).
+   - `credentials.py` — env-var / file loading helpers per [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets).
+
+4. **Runtime dispatch.** A new module `blive.runtime.broker_registry` exposes:
+   ```python
+   def get_broker(name: str, config: BrokerConfig, *, clock: ClockPort) -> BrokerPort: ...
+   def get_market_data(name: str, config: MarketDataConfig, *, clock: ClockPort) -> MarketDataPort: ...
+   ```
+   The registry maps broker names to factory functions. Importing the registry is the **only** path outside `blive.adapters.*` that knows which broker names exist; strategies, the Sizer, the RiskEngine, and the runtime never enumerate brokers directly.
+
+5. **Strategy-broker binding.** The strategy loader resolves `LiveStrategyConfig.broker` via the registry before constructing the rest of the pipeline. A single blive process can run multiple strategies on different brokers simultaneously — each strategy holds its own `BrokerPort` instance from the registry; the registry caches per-(broker, account) connections so multiple strategies on the same demo account share a connection.
+
+6. **Inventory tracking.** [INV-6 §2.1, §2.2](../inv/ports_adapters.md) widens to enumerate per-broker adapters as new rows. No new tables; broker dimension is just rows.
+
+7. **Import-linter contract amendment.** The existing `Domain layer is broker-neutral (ADR-004)` contract stays unchanged. A **new** contract is added: `Broker registry isolation (ADR-034)` — only `blive.runtime.broker_registry` may import from `blive.adapters.{paper,ig,ib}.*`; no other `blive.runtime.*` or `blive.strategy.*` module may. Enforced via `lint-imports`.
+
+### Alternatives Considered
+
+1. **Implicit dispatch via type-checking at strategy-load time** (e.g. "if `LiveStrategyConfig.ig_config` is set, use IG; else `ib_config` → IB; else paper"). Rejected: encodes selection in config presence rather than declaration; surprises if multiple `_config` blocks are present; doesn't extend cleanly to runtime broker switching.
+2. **Strategy module imports its broker adapter directly** ("the strategy's `build_strategy()` returns the `BrokerPort` it wants"). Rejected: violates [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) (strategies depend on Ports, not adapters); makes strategies broker-coupled; defeats the abstraction.
+3. **Plugin-discovery via `setuptools` entry points.** Rejected for v1: adds installation-time complexity; the static `{paper, ig, ib}` set is small enough that explicit factory dispatch is clearer; revisit at M8+ if a third-party adapter ecosystem emerges.
+
+### Consequences
+
+- **Positive:** adding a new broker is mechanical — implement four modules under `blive.adapters.{name}.*`, register the factory in `broker_registry`, add a config block to DD-3, add KB pair, add INV-6 rows. No domain-side changes; no `runtime` changes.
+- **Positive:** strategy YAML clearly declares which broker; per-broker config lives in its own block; multi-broker support is a property of the architecture, not bolted on.
+- **Positive:** the contract is enforceable via `import-linter` — drift detected at CI time, not runtime.
+- **Negative:** more substrate per broker (4 modules + 1 KB pair + 1 DD entry + 1 INV-6 entry); justified by "we expect more brokers, not fewer".
+- **Negative:** the strategy YAML changes shape (top-level `broker` required) — a minor breaking change to [DD-3](../dd/config_schemas.md), mitigated by giving M1's PaperBroker `broker: "paper"` as the migration path.
+- **Negative:** the registry adds an indirection between "load strategy" and "construct broker" that wasn't present in M1.
+- **Follow-ups:**
+  - [DD-3 §1](../dd/config_schemas.md#1-livestrategyconfig-top-level) amendment: top-level `broker` field + per-broker config blocks. M1 tests need a one-line addition (`broker: "paper"`).
+  - [INV-6 §2.1, §2.2](../inv/ports_adapters.md) amendments: enumerate IG (new) + IB (PARKED) + Paper rows.
+  - `pyproject.toml` import-linter amendment: new contract `Broker registry isolation (ADR-034)`.
+  - New module: `blive.runtime.broker_registry` (M2-IG.2 deliverable).
+  - The [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter relocates from "`blive.adapters.ib.rate_limiter`" to "`blive.adapters.shared.rate_limiter`" — that ADR's body update should accompany this one's ACCEPTED flip, or be captured as an amendment ADR if append-only discipline applies.
+
+### Cross-References
+
+- [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) — hexagonal architecture this ADR extends.
+- [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) — rate limiter; this ADR generalises its module location.
+- [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) — secrets handling (paired with this ADR).
+- [DD-3](../dd/config_schemas.md) — config schemas (amendment forthcoming in M2-IG.1 batch 2).
+- [INV-6](../inv/ports_adapters.md) — port catalogue + adapter tracker (amendment).
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2-IG — the active milestone informed by this ADR.
+
+---
+
+## ADR-035 — Secrets handling discipline (`~/.blive/secrets/`)
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[REQUIREMENTS §6.3](../../REQUIREMENTS.md#63-security--audit) commits to "credentials in OS keyring or env; never in repo or logs (log redaction list enforced)". The IG bridge ([TASK_REGISTRY](../../TASK_REGISTRY.md) M2-IG) brings the first concrete credentials surface — IG demo API key + username + password + account id — and the operator-pasted-them-in-chat moment confirmed we need explicit substrate, not implicit "we'll handle it when we get there".
+
+Implicit "handle later" is a known anti-pattern; secrets discipline rots into "the test harness happens to read from an env var that nobody documented" and from there into "credentials end up in CI logs". This ADR fixes the shape before any code touches a credential.
+
+### Decision
+
+1. **Storage location.** Credentials live at `~/.blive/secrets/{broker}.env` outside the repo. One file per broker (e.g. `ig.env`, `ib.env`). KEY=VALUE format readable by `python-dotenv` or shell. File permissions `chmod 600` (operator's responsibility on Linux/macOS; on Windows, NTFS user-only ACL — documented when [`RUNBOOK.md`](../../RUNBOOK.md) lands at M5).
+
+2. **Loading mechanism.** `blive.adapters.shared.credentials.load_credentials(broker_name) -> Credentials` reads the appropriate `~/.blive/secrets/{broker}.env`, validates required keys per the broker's schema (declared in `blive.adapters.{broker}.credentials`), and returns a frozen dataclass. **Env vars take priority over file values** — this lets Docker / systemd / CI inject credentials without writing files.
+
+3. **Per-broker schema.** Each broker adapter declares its credential schema as a frozen dataclass in `blive.adapters.{broker}.credentials`:
+   - **IG**: `IG_API_KEY`, `IG_USERNAME`, `IG_PASSWORD`, `IG_ACCOUNT_ID`, `IG_ENVIRONMENT ∈ {"demo", "live"}`.
+   - **IB**: `IB_HOST`, `IB_PORT`, `IB_CLIENT_ID`, `IB_PAPER_ACCOUNT_ID` (no password — IB Gateway handles auth via IBC per [KB-3 §5](../kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events)).
+   - **Paper**: empty (no credentials needed).
+
+4. **Repo discipline.**
+   - No credentials in git history (the inverse — committing a real secret — is a security incident requiring rotation, not a typo).
+   - No credentials in tests; unit tests use mocked `Credentials` instances; integration tests against demo accounts pull from `~/.blive/secrets/`.
+   - No credentials in commit messages, ADRs, OQs, or any `docs/` artefact.
+   - A `secrets/` directory at repo root holds **example files** with placeholder values: `secrets/ig.env.example`, `secrets/ib.env.example`. Real `.env` files live outside the repo. `.gitignore` blocks `secrets/*.env` (only `.example` files committed).
+
+5. **Log redaction.** A new `blive.utils.logging` module (M2-IG.2 deliverable) maintains a redaction list of credential field names (constructed from the union of every broker's credential-schema fields). Any log message containing a value matching a redaction-list key gets the value replaced with `[REDACTED]` before emission. The list is populated at process start by walking `blive.adapters.{paper,ig,ib}.credentials` schemas.
+
+6. **Chat / transcript discipline (operational, not enforceable in code).** Credentials shall not be pasted into Claude Code conversations or any tool whose transcripts are logged externally. When credentials need to be communicated (e.g. operator → blive process), the channel is the `~/.blive/secrets/` files. Claude does not echo credentials it has been told and does not write them into any file in the repo.
+
+### Alternatives Considered
+
+1. **OS keyring as default** (Windows Credential Manager / macOS Keychain / Secret Service via the `keyring` Python package). Rejected as default: keyring is per-user-session and complicates Docker deployment; the file path is portable across host and container with a volume mount. Keyring remains an opt-in path via a future `KEYRING_BACKEND=…` env var; not v1.
+2. **Plain env vars only.** Rejected: env vars work but are awkward for many keys; `.env` files are more ergonomic for the operator.
+3. **HashiCorp Vault or equivalent.** Rejected for v1: massive overkill for a single-operator setting. Worth revisiting only if the project goes multi-operator.
+
+### Consequences
+
+- **Positive:** credentials never enter git history; each broker's credential schema is explicit; loading is one call.
+- **Positive:** redaction protects against accidental log leaks (developer-side). The discipline is auditable.
+- **Positive:** migration path to OS keyring or Vault is clean — swap the loader implementation; the schema dataclasses don't change.
+- **Negative:** operator must maintain `~/.blive/secrets/` files manually (acceptable for v1 single-operator; flagged for the [`RUNBOOK.md`](../../RUNBOOK.md) draft at M5).
+- **Negative:** Docker deployment requires volume mount for `~/.blive/secrets/` — documented at M5 alongside `RUNBOOK.md`.
+- **Negative:** redaction list maintenance is manual; new credential keys must be added when new brokers land — the union-walk at process start makes drift detectable but not prevented.
+- **Follow-ups:**
+  - `.gitignore` rule: `secrets/*.env` (block all but `.example` files).
+  - `secrets/.gitkeep` + `secrets/ig.env.example` + `secrets/ib.env.example` committed at first M2-IG.2 code session.
+  - `blive.utils.logging` module with redaction; M2-IG.2 deliverable.
+  - `blive.adapters.shared.credentials` loader; M2-IG.2 deliverable.
+  - Each broker's `credentials.py` schema; M2-IG.3 (IG) / M2-IB resumption (IB).
+
+### Cross-References
+
+- [REQUIREMENTS §6.3](../../REQUIREMENTS.md#63-security--audit) — credentials policy.
+- [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) — multi-broker registry; this ADR is its operational pair.
+- [INV-6 §1.1](../inv/ports_adapters.md#11-brokerport) — `BrokerPort` (consumes credentials at construction).
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2-IG — first milestone using this discipline.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1305,3 +1455,4 @@ Two sub-decisions: (1) **payload** — what fields land in the emitted event; (2
 - **v0.4 (2026-04-26)** — added ADR-026 (agentic-execution layer; human-governance / agent-execution division of labour; five-layer adoption stack).
 - **v0.5 (2026-04-27)** — added ADR-027 (Sizer rounding policy: integer shares, truncate toward zero), ADR-028 (Strategy config shape: Python `build_strategy()` + blive YAML overrides), ADR-029 (`PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet) — drafted PROPOSED, accepted by operator same day; status flipped to ACCEPTED for all three.
 - **v0.6 (2026-04-27)** — added ADR-030 (per-archetype btest interpreter dispatch; resolves OQ-030; amends ADR-010 prose), ADR-031 (token-bucket rate limiter shape for IB adapters), ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`), ADR-033 (`AccountUpdate` event shape and 30-s diff-suppressed cadence). All four PROPOSED at M2 entry; awaiting operator review before flip to ACCEPTED.
+- **v0.7 (2026-04-27)** — operator-driven pivot to IG demo bridge (M2-IG) while IB Paper account is being reopened. Added cross-cutting ADRs: ADR-034 (multi-broker registry pattern; extends ADR-004 with explicit registry, package layout, and import-linter contract for N>2 brokers), ADR-035 (secrets handling discipline: `~/.blive/secrets/{broker}.env`, env-var override, log redaction list, never-in-git rule). Both PROPOSED; M2-IG.1 batch 1. IG-specific ADRs (036..039) + KB-16/17 + DD-8 land in batch 2.
