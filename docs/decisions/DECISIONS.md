@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-04-27
-version: 0.7
+version: 0.8
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -65,6 +65,10 @@ referenced_by:
 | [ADR-033](#adr-033--accountupdate-event-shape-and-sampling-cadence) | `AccountUpdate` event shape and sampling cadence | PROPOSED | 2026-04-27 | — |
 | [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) | Multi-broker registry pattern (extends ADR-004) | PROPOSED | 2026-04-27 | — |
 | [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) | Secrets handling discipline (`~/.blive/secrets/`) | PROPOSED | 2026-04-27 | — |
+| [ADR-036](#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer) | IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer | PROPOSED | 2026-04-27 | — |
+| [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) | `Instrument.tradability` field (spot / cfd / spread_bet) | PROPOSED | 2026-04-27 | — |
+| [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) | IG rate-limit defaults (parameterise ADR-031) | PROPOSED | 2026-04-27 | — |
+| [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | PROPOSED | 2026-04-27 | — |
 
 ---
 
@@ -1447,6 +1451,255 @@ Implicit "handle later" is a known anti-pattern; secrets discipline rots into "t
 
 ---
 
+## ADR-036 — IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) commits blive to multi-broker support; the IG bridge (M2-IG) is the first non-paper broker landing. IG Markets exposes its API via two channels:
+
+- **REST** for connection management, account queries, instrument search, and order placement (`POST /session`, `GET /accounts`, `GET /positions`, `POST /positions/otc`, `GET /markets`, `GET /prices`, etc.).
+- **Lightstreamer** (a streaming protocol over HTTP) for live price subscriptions and trade-update events.
+
+Two driver options:
+
+1. **`trading_ig`** — community Python wrapper for IG. Sync-leaning (uses `requests`); ~600 GitHub stars; reasonably maintained but the asyncio story is awkward.
+2. **Roll our own** — `httpx` for async REST + an asyncio Lightstreamer client.
+
+### Decision
+
+**Roll our own.** Concretely:
+
+- **REST client**: `httpx.AsyncClient` for async HTTP. The IG API surface needed for v1 is small (~10 endpoints); a focused module is cleaner than wrapping a sync library.
+- **Lightstreamer client**: official IG-recommended `lightstreamer-client-lib` (Python; supports asyncio). Streaming subscriptions wrapped per-instrument inside `IGMarketData`.
+- **Module location**: `blive.adapters.ig.client.IGClient` owns auth state (CST + X-SECURITY-TOKEN headers); used by both `IGBroker` and `IGMarketData`.
+- **Auth flow**: `IGClient.connect()` performs the 3-step REST auth (`POST /session` → header tokens stored), and starts a Lightstreamer session using the same credentials. `IGClient.close()` calls `DELETE /session`. Token TTL is 6 h on demo / 24 h on live; auto-refresh via `POST /session/refresh-token` on 401.
+- **Rate limiting**: outbound REST calls go through `blive.adapters.shared.rate_limiter` ([ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters), now broker-agnostic per [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004)) configured per [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031).
+- **Error handling**: HTTP errors mapped to typed engine exceptions (`IGAuthError`, `IGRateLimited`, `IGOrderRejected`, `IGSessionExpired`, …) at the adapter boundary. Specific code mapping in [KB-17](../kb/ig_pacing_spec.md) §"Error codes".
+- **Dependencies pinned in `pyproject.toml`**: `httpx>=0.27,<0.28`, `lightstreamer-client-lib>=2.0` (verify exact pin at first install).
+
+### Alternatives Considered
+
+1. **`trading_ig`.** Sync model fights [ADR-005](#adr-005--single-process-single-asyncio-loop-kernel-for-v1) (single asyncio loop). Wrapping in `asyncio.to_thread` adds threading concerns we just got rid of in M0. The library also pulls `pandas`/`requests` we'd otherwise control narrowly. Rejected.
+2. **CCXT.** IG is not a CCXT-supported venue. Rejected.
+3. **gRPC sidecar wrapping `trading_ig`.** Operationally heavy; defers the asyncio mismatch rather than solving it. Rejected.
+
+### Consequences
+
+- **Positive:** asyncio-native; clean fit with [ADR-005](#adr-005--single-process-single-asyncio-loop-kernel-for-v1); narrow dependency surface (`httpx`, `lightstreamer-client-lib`); errors mapped to typed exceptions at the boundary.
+- **Positive:** "small enough to read" — ~10 REST endpoints + Lightstreamer subscriptions is bounded.
+- **Negative:** more code to write and maintain than wrapping an existing library. Justified by the small surface area.
+- **Negative:** Lightstreamer is a non-trivial protocol; we depend on `lightstreamer-client-lib` for the streaming layer. If that library stalls, vendor-fork plan flagged for OQ at first sign of trouble.
+- **Follow-ups:**
+  - `IGClient` module + `IGAuthError`/`IGRateLimited`/etc. typed-exception hierarchy in M2-IG.3.
+  - First-pass `INV-?` IG error-code inventory drafted from observed responses; analogous to MISSING [INV-14](../inv/ib_error_codes.md) for IB.
+  - Pin verification: `httpx` and `lightstreamer-client-lib` versions confirmed at first install.
+
+### Cross-References
+
+- [ADR-002](#adr-002--adopt-ib_async-v21-as-wire-level-ib-driver) — IB analogue (we adopted a wrapper for IB; for IG no good wrapper exists).
+- [ADR-005](#adr-005--single-process-single-asyncio-loop-kernel-for-v1) — single-loop asyncio commitment.
+- [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) — multi-broker registry; this driver lives under that pattern.
+- [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) — IG rate-limit defaults consumed by this driver.
+- [KB-17 IG pacing spec](../kb/ig_pacing_spec.md) — DRAFT this batch.
+
+---
+
+## ADR-037 — `Instrument.tradability` field (spot / cfd / spread_bet)
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (extends [DD-1 §2.1](../dd/domain_objects.md#21-instrument))
+- **resolves:** —
+
+### Context
+
+[DD-1 §2.1](../dd/domain_objects.md#21-instrument) defines `Instrument(symbol, venue, currency, asset_class, multiplier)` as the broker-neutral identity of a tradable thing. The `asset_class` enum has `EQUITY`, `ETF`, `INDEX`, `FX`, `FUTURE`, `OPTION`. None of these distinguish *how* the instrument is held: an `ETF` `Instrument` could be physical shares (cash equity), or a CFD on the same underlying, or a spread bet — three very different cost / leverage / settlement / tax profiles.
+
+The IG bridge ([M2-IG](../../TASK_REGISTRY.md)) turns this abstract concern into a concrete one: `CAC.PA` ETF on IB ([ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf)) and `IX.D.CAC40.CASH.IP` CFD on IG are both broadly "CAC 40 exposure" but they're not interchangeable instances of `Instrument`. The Sizer's [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) integer-share rounding is correct for ETF shares and wrong for CFDs (which allow fractional contracts).
+
+### Decision
+
+Add `tradability: Literal["spot", "cfd", "spread_bet"] = "spot"` to `Instrument` ([DD-1 §2.1](../dd/domain_objects.md#21-instrument)) as a new field with default value, backward-compatible.
+
+Semantics:
+
+- **`"spot"`** — physical position in the underlying; cash equity / ETF / direct FX / direct futures contract. ADR-027 integer-share rounding applies. This is the M0+M1 default; no existing `Instrument` construction needs to change.
+- **`"cfd"`** — Contract for Difference; fractional position size allowed; per-instrument precision (e.g. 0.01 for CAC 40 CFD on IG; 0.1 for some FX CFDs). The Sizer's quantize step uses an instrument-derived precision instead of the integer-share rule. Overnight financing applies.
+- **`"spread_bet"`** — UK spread bet; sized in £/point; tax-free for UK retail. Quantize step uses pence-per-point precision. Overnight financing applies.
+
+The Sizer's `quantize_share_qty(raw, *, precision=Decimal("1"))` already accepts a `precision` parameter; the change is at the *call site* — it picks `Decimal("1")` for `tradability=="spot"` and `Decimal("0.01")` (or whatever the instrument declares) for CFDs / spread bets.
+
+The `Instrument` identity tuple ([DD-1 §2.1](../dd/domain_objects.md#21-instrument) "Equality / hashing") widens to include `tradability` — `CAC.PA` ETF and `IX.D.CAC40.CASH.IP` CFD are distinct `Instrument`s.
+
+### Alternatives Considered
+
+1. **Encode tradability in `venue`** (e.g. `venue="IG_DEMO_CFD"`). Rejected: conflates the venue (where the instrument trades) with the broker primitive (how it's held). Two separate concerns that should not be smashed into one field.
+2. **Encode tradability in `asset_class`** (e.g. add `CFD`, `SPREAD_BET` enum members). Rejected: a CFD on `EQUITY` and a CFD on `INDEX` are still meaningfully different at the asset-class level; `tradability` is orthogonal to `asset_class`.
+3. **Parallel `Instrument` types** (e.g. `CFDInstrument`, `SpreadBetInstrument`). Rejected: explodes the domain-type surface; the broker-neutral identity is one type, and tradability is just a discriminator on it.
+4. **Defer the decision; have the Sizer call broker-specific code paths.** Rejected: violates [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) (Sizer is domain code; adapters are not).
+
+### Consequences
+
+- **Positive:** backward-compatible (default `"spot"`); M0+M1 tests need no change. The CAC.PA ETF `Instrument` continues to construct without tradability and defaults to `"spot"`.
+- **Positive:** minimal expansion to the type surface; one field, one enum literal, zero new dataclasses.
+- **Positive:** Sizer rule branches on `tradability`, not on broker — domain-side; broker-neutral.
+- **Negative:** [DD-1 §2.1](../dd/domain_objects.md#21-instrument) and `src/blive/domain/types.py` need to be amended. DD-1 stays STABLE because the change is additive with default; `types.py` add the field; existing tests construct `Instrument(...)` without keyword-args other than the original five and continue to work.
+- **Negative:** the Sizer has a new branching rule; per-instrument precision needs to be sourced from somewhere (probably an `IGInstrumentMetadata` mapping inside the IG adapter, or an extra field on `Instrument`). Resolved at M2-IG.2 / .3 time.
+- **Follow-ups:**
+  - DD-1 amendment (STABLE v0.1 → v0.2) lands in M2-IG.2 alongside the `types.py` change. Same commit.
+  - Sizer ([`src/blive/sizing/sizer.py`](../../src/blive/sizing/sizer.py)) gets a per-instrument precision lookup. Open: where does precision live — on `Instrument`, on `LiveStrategyConfig`, or fetched from the broker adapter? Default lean: `Instrument.precision` field (broker-neutral, simple); revisit if a single instrument needs different precisions per broker (unlikely).
+  - [`tests/conftest.py`](../../tests/conftest.py) `cac_pa` fixture stays unchanged (defaults `"spot"`); a new `cac40_cfd` fixture lands at M2-IG.3.
+
+### Cross-References
+
+- [DD-1 §2.1](../dd/domain_objects.md#21-instrument) — `Instrument` shape (amendment forthcoming in M2-IG.2).
+- [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — CAC.PA ETF (PAUSED for the bridge per ADR-039).
+- [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) — integer-share rounding (now scoped to `tradability=="spot"`).
+- [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) — multi-broker registry; the IG vs IB distinction surfaces this need.
+- [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) — Phase 1 under bridge (uses `tradability="cfd"`).
+
+---
+
+## ADR-038 — IG rate-limit defaults (parameterise ADR-031)
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (parameterises [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters))
+- **resolves:** —
+
+### Context
+
+[ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) defined a two-level token-bucket rate limiter with **IB-specific defaults** (20 msg/sec global, 5 msg/sec per-strategy) sourced from [KB-3 §1, §9](../kb/ib_pacing_spec.md). [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) generalised the limiter's location (`blive.adapters.shared.rate_limiter`) but left per-broker default budgets unspecified.
+
+IG's published limits — see [KB-17 IG pacing spec](../kb/ig_pacing_spec.md) — are roughly an order of magnitude tighter than IB's, and have a different shape: per-minute buckets, separate buckets for trading vs general vs historical, plus a Lightstreamer subscription budget.
+
+### Decision
+
+Make the [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter accept a **per-bucket configuration table** at construction time, and ship the IG defaults in `blive.adapters.ig`. Concretely:
+
+```python
+@dataclass(frozen=True)
+class RateLimitBucket:
+    capacity: int
+    refill_per_second: Decimal
+
+@dataclass(frozen=True)
+class RateLimitConfig:
+    buckets: Mapping[str, RateLimitBucket]  # keyed by bucket name
+```
+
+The IG defaults (`blive.adapters.ig.rate_limiter.IG_DEFAULT_RATE_LIMITS`):
+
+| Bucket | Capacity | Refill | Source |
+|---|---|---|---|
+| `global` | 30 | 0.5 / s (= 30/min) | IG REST general; [KB-17 §1](../kb/ig_pacing_spec.md) |
+| `trading` | 60 | 1.0 / s (= 60/min) | IG REST trading endpoints (`/positions/otc`, `/workingorders/otc`); [KB-17 §1](../kb/ig_pacing_spec.md) |
+| `historical_prices` | 40 | 2/3 per s (= 40/min) | IG REST `/prices`; [KB-17 §1](../kb/ig_pacing_spec.md) |
+| `lightstreamer_subscriptions` | 40 | n/a (concurrent budget, not a refill bucket) | [KB-17 §3](../kb/ig_pacing_spec.md) |
+
+Each call site declares which bucket it draws from — e.g. `IGBroker.submit()` consumes from `trading`; `IGMarketData.historical_bars()` consumes from `historical_prices`; everything else from `global`. The `lightstreamer_subscriptions` "budget" is enforced as a concurrent-subscription counter inside `IGMarketData`, not the token-bucket algorithm (no refill semantics).
+
+The IB defaults (`blive.adapters.ib.rate_limiter.IB_DEFAULT_RATE_LIMITS`) preserve [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) values: `global` 20/s, `per_strategy_*` 5/s, etc. They live in the parked M2-IB code surface (not implemented yet) but the config shape is now uniform.
+
+Per-strategy overrides are admitted via [DD-3 §7 RiskOverrides](../dd/config_schemas.md#7-riskoverrides) when M4 widens that section; M2 reads constructor defaults only.
+
+### Alternatives Considered
+
+1. **Hardcode IG defaults in the limiter.** Rejected: makes the limiter broker-aware, breaks the shared-module abstraction.
+2. **Per-broker subclasses of the rate limiter.** Rejected: the algorithm is shared; only the config differs.
+3. **Single global ceiling, ignore per-bucket distinctions.** Rejected: IG's trading/general/historical buckets really are separate at the IG side; a single ceiling either over-throttles trading or under-throttles general.
+
+### Consequences
+
+- **Positive:** uniform algorithm across brokers; per-broker config localised in the broker's own module; the [G3-IG throttle test](../../TASK_REGISTRY.md) exercises the limiter with real IG defaults.
+- **Positive:** the limiter stays in `blive.adapters.shared.rate_limiter`; no broker-specific code in domain or runtime.
+- **Negative:** the limiter is now slightly more configurable than the M2-IB ADR-031 needed; minor over-engineering justified by "we now have two brokers".
+- **Follow-ups:**
+  - The [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) body's "Public surface" sketch was per-strategy-only; it widens to the named-bucket shape under this ADR. Documented as a cross-reference here; ADR-031's body stays unchanged (append-only), readers follow the cross-ref.
+  - `IGMarketData` Lightstreamer subscription counter implementation in M2-IG.3.
+  - When M4 surfaces `RiskOverrides.max_orders_per_sec_strategy` etc., the IG strategy defaults (60/min) are the cap; per-strategy config can only narrow, not widen.
+
+### Cross-References
+
+- [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) — algorithm and shape; this ADR parameterises its config.
+- [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) — multi-broker registry; rate limiter relocation.
+- [KB-17 §1, §3](../kb/ig_pacing_spec.md) — DRAFT this batch; numerical source.
+- [INV-4 RC-05, RC-06](../inv/risk_checks.md) — order-rate risk checks (M4 widens to consume per-broker config).
+- [TASK_REGISTRY](../../TASK_REGISTRY.md) M2-IG G3-IG gate — throttle test references these defaults.
+
+---
+
+## ADR-039 — Phase 1 strategy under IG bridge: CAC 40 CFD
+
+- **status:** PROPOSED
+- **date:** 2026-04-27
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+The Phase 1 plan ([TASK_REGISTRY](../../TASK_REGISTRY.md)) was: run `tkan_v4_momentum_timing` 1× as the `CAC.PA` ETF on IB Paper, ±1 bps parity vs btest, ≥ 5 trading days, 5–10% NAV slice. The 2026-04-27 IG bridge pivot needs an explicit answer to: **what is the strategy's tradable instrument under the bridge, and what does "the strategy works on IG demo" mean concretely?**
+
+Three things change under the bridge:
+
+1. **Instrument.** IG retail UK accounts trade CFDs and spread bets, not actual ETF shares. The closest CAC 40 exposure is a CAC 40 cash CFD (`tradability="cfd"` per [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet)).
+2. **Cost model.** CFDs charge daily overnight financing (tom-next or similar) instead of (or in addition to) the ETF's internal swap cost. Btest's [`FinancingCost`](../kb/cost_margin_dictionary.md#5-financingcost) handles the financing curve, but CFD-specific spread is a new component.
+3. **Parity envelope.** The G2-IB ±1 bps target was tight because the only legitimate divergence was share-rounding ([ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero)). CFD financing-cost variability (intraday tom-next moves; weekend financing rolls) makes ±1 bps unachievable. The bridge needs a different envelope.
+
+### Decision
+
+1. **Tradable instrument.** `Instrument(symbol="CAC40", venue="IG_LDN", currency="EUR", asset_class=AssetClass.INDEX, tradability="cfd")` resolved by [DD-8](../dd/ig_instrument_dictionary.md) to IG epic — first guess `IX.D.CAC40.CASH.IP`, confirmed against `/markets?searchTerm=CAC%2040` on first IG handshake. The exact symbol/venue/currency triple may shift when the handshake confirms; this ADR locks the *concept*, not the keys.
+2. **[ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) status: PAUSED** (not SUPERSEDED). The CAC.PA ETF path resumes when IB returns; ADR-021's choice is still correct for that path. The bridge runs in parallel.
+3. **NAV slice**: unchanged — 5–10% per [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10), hard cap 10%. CFD leverage built into the contract is irrelevant to NAV-slice computation; we slice account equity, not gross exposure.
+4. **Cost model**: btest's `FinancingCost` curve handles base rate (ESTER); CFD financing spread adds ~25–50 bps annualised on top — provided as a `LiveFinancingProvider` override per [DD-3 §4](../dd/config_schemas.md#4-livefinancingprovider) when the bridge runs. Exact spread observed from IG `/positions` at first run; documented in [`docs/retros/M2-IG_retrospective.md`](../retros/) for future reference.
+5. **Parity envelope**: the ±1 bps target is **not** the M2-IG.5 success criterion. Instead:
+   - **Directional alignment**: every rebalance day's signed position matches btest's signed position (sign-only test). This is the strongest claim under CFD friction.
+   - **Magnitude envelope**: end-of-period equity-curve divergence < 100 bps over the 5-day run, with the gap *characterised* (financing cost vs spread vs share-rounding-on-CFD-fractional-precision). The "characterised" requirement is harder than just "< 100 bps"; we need to attribute the residual.
+   - The full parity diagnostic ([ADR-012](#adr-012--parity-diagnostic-mandatory-daily-degraded-mode-if-broken)) for M7 can absorb CFD-specific decomposition; M2-IG.5 is a sanity check, not a calibration.
+6. **TKAN artefact**: unchanged. [ADR-022](#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning), [ADR-023](#adr-023--tkan-artefact-path-and-refresh-ownership) apply identically; broker-agnostic.
+7. **Sizer rounding**: per [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) `tradability="cfd"` rule — fractional contracts at the IG-instrument's declared precision (CAC 40 CFD on IG is typically 0.01 contract minimum; verified at first handshake).
+
+### Alternatives Considered
+
+1. **Skip the strategy, just exercise IG read-side connectivity.** Rejected: operator's intent is "exercise the broker abstraction with a real venue end-to-end". Stopping at read-side leaves the multi-broker abstraction untested under writes.
+2. **Different instrument** (e.g. SP500 CFD on IG). Rejected: changes more variables than necessary; the strategy is calibrated against CAC; staying with CAC isolates the broker / tradability variables.
+3. **Spread bet instead of CFD.** Rejected as default for v1 bridge: spread-bet sizing in £/point is more friction; CFD aligns better with the existing notional-EUR strategy mental model. Spread-bet path remains an option later.
+4. **Tighter parity envelope (e.g. ±10 bps).** Rejected: financing-cost variability at IG demo over 5 trading days can exceed 10 bps just from the demo's idiosyncratic financing curve. 100 bps is the right "sanity check, not calibration" envelope.
+
+### Consequences
+
+- **Positive:** the bridge has a concrete, falsifiable success criterion that doesn't require chasing a parity envelope that's not achievable on CFDs anyway.
+- **Positive:** ADR-021 stays valid for IB return; no decision is reversed; the bridge is a parallel track.
+- **Negative:** the M2-IG.5 retro will record a CFD-financing characterisation that doesn't directly inform the M2-IB / M3 future ±1 bps target. Some M2-IG learning is bridge-specific.
+- **Negative:** CFD financing is an additional cost component the operator hasn't seen in btest historical results; the strategy's net P&L on IG demo will differ from btest's net P&L by a non-trivial margin even when "directionally aligned".
+- **Follow-ups:**
+  - First IG handshake confirms the CAC 40 CFD epic; DD-8 row updated.
+  - First IG `/positions` query records the demo's actual financing rate; documented.
+  - Sizer per-instrument precision lookup: M2-IG.2/.3 work.
+  - Strategy `LiveStrategyConfig` for the bridge: `~/.blive/strategies/tkan_v4_momentum_timing_1x_ig/live.yaml` with `broker: "ig"` per [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) plus `live_financing_provider` override for IG's CFD financing curve. Concrete YAML lands in M2-IG.5.
+
+### Cross-References
+
+- [ADR-013](#adr-013--v1-scope-etf-and-index-strategies-only) — v1 scope (bridge phase exercises CFD; ETF path resumes when IB returns).
+- [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10) — NAV slice (unchanged).
+- [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — CAC.PA ETF (PAUSED for the bridge).
+- [ADR-022](#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning), [ADR-023](#adr-023--tkan-artefact-path-and-refresh-ownership) — TKAN artefact policy (unchanged).
+- [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004), [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) — multi-broker / secrets substrate.
+- [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) — `tradability="cfd"`.
+- [DD-8 IG instrument dictionary](../dd/ig_instrument_dictionary.md) — DRAFT this batch.
+- [TASK_REGISTRY M2-IG.5](../../TASK_REGISTRY.md) — strategy run + retro milestone.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1456,3 +1709,4 @@ Implicit "handle later" is a known anti-pattern; secrets discipline rots into "t
 - **v0.5 (2026-04-27)** — added ADR-027 (Sizer rounding policy: integer shares, truncate toward zero), ADR-028 (Strategy config shape: Python `build_strategy()` + blive YAML overrides), ADR-029 (`PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet) — drafted PROPOSED, accepted by operator same day; status flipped to ACCEPTED for all three.
 - **v0.6 (2026-04-27)** — added ADR-030 (per-archetype btest interpreter dispatch; resolves OQ-030; amends ADR-010 prose), ADR-031 (token-bucket rate limiter shape for IB adapters), ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`), ADR-033 (`AccountUpdate` event shape and 30-s diff-suppressed cadence). All four PROPOSED at M2 entry; awaiting operator review before flip to ACCEPTED.
 - **v0.7 (2026-04-27)** — operator-driven pivot to IG demo bridge (M2-IG) while IB Paper account is being reopened. Added cross-cutting ADRs: ADR-034 (multi-broker registry pattern; extends ADR-004 with explicit registry, package layout, and import-linter contract for N>2 brokers), ADR-035 (secrets handling discipline: `~/.blive/secrets/{broker}.env`, env-var override, log redaction list, never-in-git rule). Both PROPOSED; M2-IG.1 batch 1. IG-specific ADRs (036..039) + KB-16/17 + DD-8 land in batch 2.
+- **v0.8 (2026-04-27)** — M2-IG.1 batch 2 IG-specific substrate. ADR-036 (IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer; rejects `trading_ig` for asyncio mismatch with ADR-005), ADR-037 (`Instrument.tradability` field — backward-compatible spot/cfd/spread_bet discriminator; scopes ADR-027 integer-share rounding to spot only), ADR-038 (IG rate-limit defaults — parameterises ADR-031 with named-bucket config; IG defaults 30/60/40 per minute + 40 concurrent Lightstreamer subscriptions; broker-agnostic shape), ADR-039 (Phase 1 strategy under IG bridge — CAC 40 CFD as tradable instrument; ADR-021 PAUSED not SUPERSEDED; new parity envelope: directional alignment + characterised < 100 bps over 5-day run, *not* G2-IB ±1 bps). All four PROPOSED; awaiting operator review alongside ADR-034..035 to flip ACCEPTED en bloc.
