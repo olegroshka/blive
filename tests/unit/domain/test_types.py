@@ -58,6 +58,53 @@ def test_instrument_rejects_zero_multiplier() -> None:
         )
 
 
+def test_instrument_tradability_defaults_to_spot() -> None:
+    """ADR-037: backward-compatible default; existing constructions get 'spot'."""
+    inst = Instrument(
+        symbol="AAPL",
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.EQUITY,
+        multiplier=Decimal("1"),
+    )
+    assert inst.tradability == "spot"
+
+
+def test_instrument_rejects_unknown_tradability() -> None:
+    """ADR-037: validation at construction time."""
+    with pytest.raises(ValueError, match="tradability"):
+        Instrument(
+            symbol="AAPL",
+            venue="XNAS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            multiplier=Decimal("1"),
+            tradability="future",  # type: ignore[arg-type]
+        )
+
+
+def test_instrument_tradability_widens_identity() -> None:
+    """ADR-037: CAC.PA ETF (spot) and CAC 40 CFD (cfd) are distinct Instruments
+    even when symbol/venue/currency/asset_class match — different tradability
+    means different cost / leverage / settlement profile."""
+    spot = Instrument(
+        symbol="CAC40",
+        venue="XPAR",
+        currency="EUR",
+        asset_class=AssetClass.INDEX,
+        tradability="spot",
+    )
+    cfd = Instrument(
+        symbol="CAC40",
+        venue="XPAR",
+        currency="EUR",
+        asset_class=AssetClass.INDEX,
+        tradability="cfd",
+    )
+    assert spot != cfd
+    assert hash(spot) != hash(cfd)
+
+
 # --- Order -------------------------------------------------------------------
 
 

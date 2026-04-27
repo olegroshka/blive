@@ -3,8 +3,8 @@ id: DD-1
 title: Domain Objects Data Dictionary
 status: STABLE
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-04-27
+version: 0.2
 sources:
   - REQUIREMENTS.md §5.3 (Order shape, FSM)
   - REQUIREMENTS.md §5.4 (Position, AccountSnapshot)
@@ -35,7 +35,7 @@ the propagation in one commit.
 ## Scope
 
 **In:** the eight value types listed in §1; their shared enums (`OrderSide`,
-`OrderType`, `TimeInForce`, `OrderState`, `OrderEventKind`, `AssetClass`).
+`OrderType`, `TimeInForce`, `OrderState`, `OrderEventKind`, `AssetClass`); the `Tradability` literal alias ([ADR-037](../decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet)).
 
 **Out:** event payloads beyond `OrderEvent` (covered by INV-5);
 broker-specific identifiers like IB `ConID` (covered by DD-7
@@ -95,20 +95,20 @@ SQLite DDL for persisted rows (DD-4, MISSING — added at M4); REST payloads
 
 ### 2.1 `Instrument`
 
-Broker-neutral identity. Adapter-side resolution to IB `Contract` / `ConID`
-will be governed by DD-7 (MISSING; lands at M2).
+Broker-neutral identity. Adapter-side resolution to broker-native form is governed by [DD-7 (IB)](./instrument_dictionary.md) and [DD-8 (IG)](./ig_instrument_dictionary.md).
 
 | Field | Type | Semantics | Invariant |
 |-------|------|-----------|-----------|
-| `symbol` | `str` | broker-neutral ticker, e.g. `"CAC.PA"`, `"AAPL"`, `"TQQQ"` | non-empty; ASCII; no whitespace |
+| `symbol` | `str` | broker-neutral ticker, e.g. `"CAC.PA"`, `"AAPL"`, `"TQQQ"`, `"CAC40"` | non-empty; ASCII; no whitespace |
 | `venue` | `str` | exchange / MIC code, e.g. `"XPAR"`, `"XNAS"`, `"ARCA"` | non-empty; uppercase ISO 10383 MIC where one exists |
 | `currency` | `str` | trading currency, ISO 4217, e.g. `"EUR"`, `"USD"` | exactly 3 uppercase letters |
 | `asset_class` | `AssetClass` | enum classifier | one of the enum members |
 | `multiplier` | `Decimal` | contract multiplier (1 for cash equities/ETFs; 100 for US options; etc.) | strictly positive |
+| `tradability` | `Tradability` | how the instrument is held: `"spot"` (cash equity / ETF / direct), `"cfd"` (Contract for Difference), `"spread_bet"` (UK spread bet). Defaults to `"spot"` for backward compatibility. Per [ADR-037](../decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet). | one of the literal members |
 
-**Equality / hashing.** Identity is the tuple `(symbol, venue, currency, asset_class)`; `multiplier` is informational. The dataclass is frozen so equality is field-wise — callers should not rely on multi-symbol aliases (e.g. corp-action renames) being equal.
+**Equality / hashing.** Identity is the tuple `(symbol, venue, currency, asset_class, tradability)`; `multiplier` is informational. Per [ADR-037](../decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet) `tradability` widens the identity — `CAC.PA` ETF (spot) and `IX.D.CAC40.CASH.IP` CFD are distinct `Instrument`s even when symbol/venue/currency/asset_class match. The dataclass is frozen so equality is field-wise — callers should not rely on multi-symbol aliases (e.g. corp-action renames) being equal.
 
-**Sample.**
+**Sample (spot — Phase 1 IB path, [ADR-021](../decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf)).**
 
 ```python
 Instrument(
@@ -117,8 +117,24 @@ Instrument(
     currency="EUR",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
+    # tradability="spot" (default; explicit when documenting)
 )
 ```
+
+**Sample (CFD — Phase 1 IG bridge path, [ADR-039](../decisions/DECISIONS.md#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd)).**
+
+```python
+Instrument(
+    symbol="CAC40",
+    venue="XPAR",
+    currency="EUR",
+    asset_class=AssetClass.INDEX,
+    multiplier=Decimal("1"),
+    tradability="cfd",
+)
+```
+
+**Sizer interaction.** [ADR-027](../decisions/DECISIONS.md#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) integer-share rounding scopes to `tradability == "spot"`. CFDs and spread bets use per-instrument fractional precision sourced from the broker resolver (`IGInstrumentResolver.precision_for(instrument)` per [DD-8 §5](./ig_instrument_dictionary.md#5-per-instrument-precision)).
 
 **Lineage.** Constructed by the strategy ingest layer from the btest
 `Universe` (see [KB-1 §3](../kb/btest_dsl_inventory.md#3-universe)) or by the
@@ -384,3 +400,4 @@ None blocking M0. Future follow-ups are tracked in
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial STABLE write at M0.
+- **v0.2 (2026-04-27)** — M2-IG.2 amendment per [ADR-037](../decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet). Added `Tradability` literal alias (`spot` / `cfd` / `spread_bet`) and `Instrument.tradability` field with default `"spot"`. Backward-compatible — every existing `Instrument(...)` construction keeps working with default. Identity tuple widens to include `tradability`; CAC.PA ETF (spot) and CAC 40 CFD (cfd) are distinct identities. Sample showing CFD form added. Sizer-interaction note added linking ADR-027 scope. Status stays STABLE — change is purely additive.

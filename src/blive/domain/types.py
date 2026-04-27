@@ -19,6 +19,15 @@ from uuid import UUID
 ClientOrderId = NewType("ClientOrderId", UUID)
 
 
+# --- Tradability (DD-1 §2.1; ADR-037) ----------------------------------------
+
+# How an instrument is held — discriminates spot ownership from derivative
+# wrappers. Forwards to the Sizer's quantize step (integer-share rule for
+# "spot" per ADR-027; per-instrument fractional precision for "cfd" / "spread_bet").
+Tradability = Literal["spot", "cfd", "spread_bet"]
+_TRADABILITY_VALUES: frozenset[str] = frozenset({"spot", "cfd", "spread_bet"})
+
+
 # --- Enums (DD-1 §1.1) -------------------------------------------------------
 
 
@@ -110,6 +119,7 @@ class Instrument:
     currency: str
     asset_class: AssetClass
     multiplier: Decimal = Decimal("1")
+    tradability: Tradability = "spot"
 
     def __post_init__(self) -> None:
         if not self.symbol or self.symbol != self.symbol.strip() or " " in self.symbol:
@@ -121,6 +131,11 @@ class Instrument:
         _require_iso_currency(self.currency, "Instrument.currency")
         if self.multiplier <= 0:
             raise ValueError(f"Instrument.multiplier must be positive, got {self.multiplier!r}")
+        if self.tradability not in _TRADABILITY_VALUES:
+            raise ValueError(
+                f"Instrument.tradability must be one of {sorted(_TRADABILITY_VALUES)}, "
+                f"got {self.tradability!r}"
+            )
 
 
 # --- Bar (DD-1 §2.2) ---------------------------------------------------------
@@ -341,6 +356,7 @@ __all__ = [
     # Aliases
     "ClientOrderId",
     "BarFreq",
+    "Tradability",
     "TradeAggressor",
     "TERMINAL_ORDER_STATES",
     # Enums
