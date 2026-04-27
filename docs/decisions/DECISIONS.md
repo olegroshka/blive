@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-04-27
-version: 0.8
+version: 0.9
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -59,16 +59,16 @@ referenced_by:
 | [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) | Sizer rounding policy: integer shares, truncate toward zero | ACCEPTED | 2026-04-27 | — |
 | [ADR-028](#adr-028--strategy-config-shape-python-build_strategy--blive-yaml-overrides) | Strategy config shape: Python `build_strategy()` + blive YAML overrides | ACCEPTED | 2026-04-27 | — |
 | [ADR-029](#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet) | `PaperMarketData` as `MarketDataPort` adapter, fixture-backed parquet | ACCEPTED | 2026-04-27 | — |
-| [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) | Per-archetype btest interpreter dispatch (amends ADR-010) | PROPOSED | 2026-04-27 | OQ-030 |
+| [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) | Per-archetype btest interpreter dispatch (amends ADR-010) | ACCEPTED | 2026-04-27 | OQ-030 |
 | [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) | Token-bucket rate limiter shape for IB adapters | PROPOSED | 2026-04-27 | — |
 | [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) | Instrument resolution policy (`blive.Instrument` ↔ IB `Contract` / `ConID`) | PROPOSED | 2026-04-27 | — |
-| [ADR-033](#adr-033--accountupdate-event-shape-and-sampling-cadence) | `AccountUpdate` event shape and sampling cadence | PROPOSED | 2026-04-27 | — |
-| [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) | Multi-broker registry pattern (extends ADR-004) | PROPOSED | 2026-04-27 | — |
-| [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) | Secrets handling discipline (`~/.blive/secrets/`) | PROPOSED | 2026-04-27 | — |
-| [ADR-036](#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer) | IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer | PROPOSED | 2026-04-27 | — |
-| [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) | `Instrument.tradability` field (spot / cfd / spread_bet) | PROPOSED | 2026-04-27 | — |
-| [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) | IG rate-limit defaults (parameterise ADR-031) | PROPOSED | 2026-04-27 | — |
-| [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | PROPOSED | 2026-04-27 | — |
+| [ADR-033](#adr-033--accountupdate-event-shape-and-sampling-cadence) | `AccountUpdate` event shape and sampling cadence | ACCEPTED | 2026-04-27 | — |
+| [ADR-034](#adr-034--multi-broker-registry-pattern-extends-adr-004) | Multi-broker registry pattern (extends ADR-004) | ACCEPTED | 2026-04-27 | — |
+| [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) | Secrets handling discipline (`~/.blive/secrets/`) | ACCEPTED | 2026-04-27 | — |
+| [ADR-036](#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer) | IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer | ACCEPTED | 2026-04-27 | — |
+| [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) | `Instrument.tradability` field (spot / cfd / spread_bet) | ACCEPTED | 2026-04-27 | — |
+| [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) | IG rate-limit defaults (parameterise ADR-031) | ACCEPTED | 2026-04-27 | — |
+| [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | ACCEPTED | 2026-04-27 | — |
 
 ---
 
@@ -1085,7 +1085,7 @@ The adapter is the M1 substrate-level placeholder slot already declared in [INV-
 
 ## ADR-030 — Per-archetype btest interpreter dispatch (amends ADR-010)
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
@@ -1244,7 +1244,7 @@ Three concerns: the field-level mapping; the ConID lookup mechanism + caching st
 
 ## ADR-033 — `AccountUpdate` event shape and sampling cadence
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
@@ -1305,7 +1305,7 @@ Two sub-decisions: (1) **payload** — what fields land in the emitted event; (2
 
 ## ADR-034 — Multi-broker registry pattern (extends ADR-004)
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none (extends [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement))
@@ -1388,7 +1388,7 @@ Adopt a **multi-broker registry pattern**, layered on top of [ADR-004](#adr-004-
 
 ## ADR-035 — Secrets handling discipline (`~/.blive/secrets/`)
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
@@ -1453,7 +1453,7 @@ Implicit "handle later" is a known anti-pattern; secrets discipline rots into "t
 
 ## ADR-036 — IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
@@ -1512,7 +1512,7 @@ Two driver options:
 
 ## ADR-037 — `Instrument.tradability` field (spot / cfd / spread_bet)
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none (extends [DD-1 §2.1](../dd/domain_objects.md#21-instrument))
@@ -1569,7 +1569,7 @@ The `Instrument` identity tuple ([DD-1 §2.1](../dd/domain_objects.md#21-instrum
 
 ## ADR-038 — IG rate-limit defaults (parameterise ADR-031)
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none (parameterises [ADR-031](#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters))
@@ -1639,7 +1639,7 @@ Per-strategy overrides are admitted via [DD-3 §7 RiskOverrides](../dd/config_sc
 
 ## ADR-039 — Phase 1 strategy under IG bridge: CAC 40 CFD
 
-- **status:** PROPOSED
+- **status:** ACCEPTED
 - **date:** 2026-04-27
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
@@ -1710,3 +1710,4 @@ Three things change under the bridge:
 - **v0.6 (2026-04-27)** — added ADR-030 (per-archetype btest interpreter dispatch; resolves OQ-030; amends ADR-010 prose), ADR-031 (token-bucket rate limiter shape for IB adapters), ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`), ADR-033 (`AccountUpdate` event shape and 30-s diff-suppressed cadence). All four PROPOSED at M2 entry; awaiting operator review before flip to ACCEPTED.
 - **v0.7 (2026-04-27)** — operator-driven pivot to IG demo bridge (M2-IG) while IB Paper account is being reopened. Added cross-cutting ADRs: ADR-034 (multi-broker registry pattern; extends ADR-004 with explicit registry, package layout, and import-linter contract for N>2 brokers), ADR-035 (secrets handling discipline: `~/.blive/secrets/{broker}.env`, env-var override, log redaction list, never-in-git rule). Both PROPOSED; M2-IG.1 batch 1. IG-specific ADRs (036..039) + KB-16/17 + DD-8 land in batch 2.
 - **v0.8 (2026-04-27)** — M2-IG.1 batch 2 IG-specific substrate. ADR-036 (IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer; rejects `trading_ig` for asyncio mismatch with ADR-005), ADR-037 (`Instrument.tradability` field — backward-compatible spot/cfd/spread_bet discriminator; scopes ADR-027 integer-share rounding to spot only), ADR-038 (IG rate-limit defaults — parameterises ADR-031 with named-bucket config; IG defaults 30/60/40 per minute + 40 concurrent Lightstreamer subscriptions; broker-agnostic shape), ADR-039 (Phase 1 strategy under IG bridge — CAC 40 CFD as tradable instrument; ADR-021 PAUSED not SUPERSEDED; new parity envelope: directional alignment + characterised < 100 bps over 5-day run, *not* G2-IB ±1 bps). All four PROPOSED; awaiting operator review alongside ADR-034..035 to flip ACCEPTED en bloc.
+- **v0.9 (2026-04-27)** — operator approval moment. Eight ADRs flipped PROPOSED → ACCEPTED en bloc: ADR-030 (per-archetype dispatch — broker-agnostic; resolves OQ-030), ADR-033 (AccountUpdate cadence — broker-agnostic), ADR-034 (multi-broker registry; load-bearing), ADR-035 (secrets handling discipline), ADR-036 (IG driver), ADR-037 (Instrument.tradability), ADR-038 (IG rate-limit defaults), ADR-039 (Phase 1 under IG bridge). **Two ADRs stay PROPOSED**: ADR-031 (IB-specific rate-limit defaults; revisit when M2-IB resumes) and ADR-032 (IB-specific instrument resolution; revisit when M2-IB resumes). Updated OQ-030 status RESOLVED-BY-ADR-030 in OPEN_QUESTIONS.md.

@@ -4,7 +4,7 @@ title: Open Questions
 status: DRAFT
 owner: shared (Oleg primary, Claude assist)
 last_reviewed: 2026-04-27
-version: 0.2
+version: 0.3
 sources: []
 depends_on: []
 referenced_by:
@@ -302,7 +302,7 @@ These sub-questions surfaced when the parent decisions (OQ-013, 014, 015, 018) w
 
 ### OQ-030 — Which btest interpreter does blive call for `TimingPortfolio` (and other non-LongShort archetypes)?
 
-- **status:** IN_DISCUSSION (default proposed below; surface for confirmation at G2 review)
+- **status:** RESOLVED-BY-ADR-030 (2026-04-27)
 - **opened:** 2026-04-27 · **target_resolution:** G2 gate
 - **depends_on:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import); [KB-1 §6, §7](../kb/btest_dsl_inventory.md)
 - **Background:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) commits blive to importing `FactorEngine`, `SignalEngine`, `PortfolioEngine` from btest. M1 work surfaced two facts:
@@ -336,6 +336,7 @@ These sub-questions surfaced when the parent decisions (OQ-013, 014, 015, 018) w
 | OQ-025 | ADR-021 | CAC ETF proxy: `CAC.PA` (Lyxor CAC 40 UCITS ETF) |
 | OQ-026 | ADR-022 | TKAN artefact freshness window: 30d hard, 21d warning |
 | OQ-027 | ADR-023 | TKAN artefact path and refresh ownership |
+| OQ-030 | ADR-030 | Per-archetype btest interpreter dispatch (amends ADR-010) |
 
 ### RESOLVED (no ADR needed, factual finding)
 
@@ -348,7 +349,6 @@ OQ-017 — Triple Leveraged ETF instrument set is `{TQQQ, TMF, IEF}`.
 | OQ-012 | Parity tolerance bands | calibrate at M7 |
 | OQ-023 | ForgeFolio integration | post-M8 |
 | OQ-028 | Agentic memory framework / tooling for L0+L1 | before L0+L1 implementation |
-| OQ-030 | btest interpreter dispatch for non-LongShort archetypes | G2 review |
 | OQ-029 | Timing of L0+L1 implementation | at or before G4 gate |
 
 ### IN_DISCUSSION (have a working default in REQUIREMENTS §16; ADRs not yet written)
@@ -371,3 +371,5 @@ OQ-001..OQ-011, OQ-020.
 - **v0.1.2 (2026-04-26)** — Phase 1 readiness audit raised OQ-023 (KB-13 ForgeFolio), OQ-024..OQ-027 (sub-questions of resolved OQ-013/014/015/018 that block detailed Phase 1 planning). All carry proposed defaults; operator confirmation pending. New Section B' added.
 - **v0.1.3 (2026-04-26)** — Operator confirmed OQ-024..OQ-027. Promoted to RESOLVED-BY-ADR-020 (NAV slice), ADR-021 (CAC ETF proxy), ADR-022 (TKAN freshness window), ADR-023 (TKAN artefact path/ownership). Section C tables updated. G0 gate now passable.
 - **v0.1.4 (2026-04-26)** — ADR-026 (agentic-execution layer) added; OQ-028 (memory framework choice) and OQ-029 (implementation timing) raised. New Section B'' for layer-related questions.
+- **v0.2 (2026-04-27 / M1 close)** — OQ-030 raised at M1 close (btest interpreter dispatch for non-LongShort archetypes); IN_DISCUSSION pending G2 review.
+- **v0.3 (2026-04-27 / M2-IG.1 substrate ACCEPTED batch)** — OQ-030 status flipped IN_DISCUSSION → RESOLVED-BY-ADR-030 alongside the eight-ADR ACCEPTED flip. Section C tables updated. Now: 13 RESOLVED-BY-ADR (013–016, 018, 019, 021, 022, 024–027, 030); 1 RESOLVED-by-finding (017); 4 OPEN (012, 023, 028, 029); 11 IN_DISCUSSION (001–011, 020).
