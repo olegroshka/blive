@@ -56,3 +56,11 @@ Thumbs.db
 *.toc
 *.lof
 *.lot
+
+# Per ADR-035: secrets/*.env files hold real broker credentials and must
+# NEVER enter git. Only the .example template files (and .gitkeep) are
+# committed; real files live at ~/.blive/secrets/{broker}.env outside
+# the repo. The repo-local secrets/ directory exists only to host the
+# templates and demonstrate the schema.
+secrets/*.env
+!secrets/*.env.example
