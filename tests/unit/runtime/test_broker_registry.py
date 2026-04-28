@@ -48,11 +48,9 @@ def test_paper_is_bootstrapped() -> None:
 
 
 def test_ig_broker_is_bootstrapped() -> None:
-    """`ig` broker factory is registered at M2-IG.3 close. Market-data
-    factory for `ig` lands at M2-IG.3 follow-up alongside IGMarketData;
-    until then, get_market_data('ig') raises UnknownBroker."""
+    """`ig` broker + market-data factories registered at M2-IG.3 close."""
     assert "ig" in known_brokers()
-    assert "ig" not in known_market_data()
+    assert "ig" in known_market_data()
 
 
 def test_ig_get_broker_returns_ig_broker() -> None:
