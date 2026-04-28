@@ -41,10 +41,61 @@ def _reset_registries_after_each_test() -> Any:
 
 
 def test_paper_is_bootstrapped() -> None:
-    """`paper` is registered out of the box — it's the only adapter that
-    pre-dates the multi-broker registry (M0 / M1)."""
+    """`paper` is registered out of the box — pre-dates the multi-broker
+    registry (M0 / M1)."""
     assert "paper" in known_brokers()
     assert "paper" in known_market_data()
+
+
+def test_ig_broker_is_bootstrapped() -> None:
+    """`ig` broker factory is registered at M2-IG.3 close. Market-data
+    factory for `ig` lands at M2-IG.3 follow-up alongside IGMarketData;
+    until then, get_market_data('ig') raises UnknownBroker."""
+    assert "ig" in known_brokers()
+    assert "ig" not in known_market_data()
+
+
+def test_ig_get_broker_returns_ig_broker() -> None:
+    """get_broker('ig', ...) wires up IGClient + IGInstrumentResolver +
+    IGBroker via the create_ig_broker factory. We only verify the
+    return type — full transport-level testing lives in the IG-adapter
+    test files."""
+    from datetime import datetime, timezone
+    from decimal import Decimal as _Decimal
+
+    import httpx
+
+    from blive.adapters.clock.sim import SimClock
+    from blive.adapters.ig import IGBroker, IGCredentials
+    from blive.adapters.shared.rate_limiter import (
+        RateLimitBucket,
+        RateLimitConfig,
+        TokenBucketRateLimiter,
+    )
+
+    clock = SimClock(start=datetime(2026, 4, 28, tzinfo=timezone.utc))
+    rate_limiter = TokenBucketRateLimiter(
+        clock=clock,
+        config=RateLimitConfig(
+            buckets={
+                "general": RateLimitBucket(capacity=10, refill_per_second=_Decimal("1")),
+                "trading": RateLimitBucket(capacity=10, refill_per_second=_Decimal("1")),
+            }
+        ),
+    )
+    creds = IGCredentials(
+        api_key="k", username="u", password="p", account_id="ACC", environment="demo"
+    )
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={}))
+
+    broker = get_broker(
+        "ig",
+        credentials=creds,
+        rate_limiter=rate_limiter,
+        clock=clock,
+        transport=transport,
+    )
+    assert isinstance(broker, IGBroker)
 
 
 def test_known_brokers_returns_sorted_tuple() -> None:

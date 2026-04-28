@@ -29,6 +29,7 @@ from blive.domain.ports import BrokerPort, MarketDataPort
 # --- Adapter imports (the load-bearing isolation point) ---------------------
 # Per ADR-034, these are the imports the import-linter contract whitelists.
 # Other broker adapters (`ig`, `ib`) join here as their packages land.
+from blive.adapters.ig import create_ig_broker
 from blive.adapters.paper.broker import PaperBroker
 from blive.adapters.paper.market_data import PaperMarketData
 
@@ -58,10 +59,17 @@ _BROKER_FACTORIES: dict[str, BrokerFactory] = {
     # PaperBroker is its own factory — its constructor accepts the
     # injection kwargs (clock, price_lookup, …) that the caller supplies.
     "paper": PaperBroker,
+    # IG uses a higher-level factory that builds IGClient + IGInstrumentResolver
+    # internally (the IGBroker constructor takes the wired-up dependency tree
+    # rather than the raw config inputs the caller has).
+    "ig": create_ig_broker,
 }
 
 _MARKET_DATA_FACTORIES: dict[str, MarketDataFactory] = {
     "paper": PaperMarketData,
+    # `ig` market-data factory lands at M2-IG.3 follow-up alongside
+    # `IGMarketData` (Lightstreamer + REST historical). Until then,
+    # `get_market_data("ig")` raises UnknownBroker which is correct.
 }
 
 _BOOTSTRAP_BROKER_FACTORIES = dict(_BROKER_FACTORIES)
