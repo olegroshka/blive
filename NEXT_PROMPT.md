@@ -1,94 +1,104 @@
-# Session kickoff prompt — paste this into a fresh Claude Code session
+# Session kickoff prompt — M2-IB resumption (paste this into a fresh Claude Code session)
 
 > Working directory must be `C:\Users\olegr\PycharmProjects\blive`. If your shell starts elsewhere, switch first.
 
 ---
 
-## You are joining a disciplined project
+## You are joining a disciplined project mid-pivot
 
 This project is `blive` — a live algorithmic-execution engine for Interactive Brokers, sibling to `btest` (research backtesting framework). It is run by Oleg Roshka, a UK-based independent quant researcher.
 
 The project practises **Cognitive Cartography**, a substrate-engineering discipline articulated in `docs/method/paper/cognitive_cartography.tex`. In short: every fact has one home; cross-references use stable IDs; decisions are append-only ADRs; questions are append-only OQs; status lifecycle is explicit; an edit protocol governs all changes.
 
-You will read the discipline (and the M0+M1 substrate that you are extending) before working. You will then plan. Only then will you produce code.
+**The pivot you're inheriting** (read this first):
+
+- M0 + M1 closed cleanly (paper-mode pipeline, 175 tests, RETRO-M0 / RETRO-M1).
+- M2 was originally a single milestone (IB read side). When the IB Paper account was unavailable in late April 2026, the project ran a 2-session **IG demo bridge** (M2-IG) to exercise the multi-broker abstraction against a non-paper venue. The bridge shipped at architectural surface (~359 tests, broker-agnostic shared modules, IG-specific code, Lightstreamer abstraction) but **was never run against IG's actual servers** — it closed at architectural surface when the IB Paper account became available on **2026-04-28** (enabled 2026-04-29).
+- The **IG bridge's primary dividend** was the cross-cutting architectural work — broker registry ([ADR-034](docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004)), secrets handling ([ADR-035](docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets)), `Instrument.tradability` field ([ADR-037](docs/decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet)), `blive.adapters.shared.{rate_limiter, credentials}`, `blive.runtime.broker_registry`. **All of this transfers to IB unchanged.** M2-IB is now scaffolded by what M2-IG built.
+- The **M2-IG-specific code** (`blive.adapters.ig.*`, KB-16, KB-17, DD-8, ADR-036/038/039) is preserved in repo as durable reference. It is **not** active and has no scheduled revival.
+
+You will read the discipline (and the M0+M1+M2-IG substrate that you are extending) before working. You will then plan. Only then will you produce code.
 
 ---
 
 ## Step 1 — Warm-up (do this BEFORE any work, in order)
 
-Read the following files. Do **not** skim. Stop and re-read if anything is unclear.
+Read the following. Do **not** skim. Stop and re-read if anything is unclear.
 
 1. **`CONTEXT_PROTOCOL.md`** — at minimum §0 (TL;DR). The protocol governs every edit you will make. The trivial-fix lane is in §3.4. Anti-patterns are in §3.5.
-2. **`CONTEXT_INVENTORY.md`** — the registry of every knowledge artefact. Read it end-to-end. The §10 "Outstanding queue" tells you where the project is right now (M2 is the next concrete milestone).
-3. **`TASK_REGISTRY.md`** — the Phase 1 plan. Today's work is the **M2 milestone** in that file. Read M2 in full. Skim M3 for context. Note the G3 gate at the end of M2.
-4. **`docs/retros/M0_retrospective.md`** and **`docs/retros/M1_retrospective.md`** — the M0 and M1 close retrospectives. The "Recommendations for NEXT_PROMPT M_{N+1}" and "Surprises" sections in particular contain hard-won notes from prior sessions that will save you time. The M1 retro flags **OQ-030** (btest-interpreter dispatch for non-LongShort archetypes) which you'll likely need to settle this session.
-5. **`REQUIREMENTS.md`** — re-read §5.2 (live market data + pacing), §5.7 (reconciliation: startup form is M2), §6.1 (latency NFRs), §10 (IB-specific gotchas), §12 (operational model — Docker, IBC, daily TWS restart).
-6. **`docs/decisions/DECISIONS.md`** — read **ADR-002 (`ib_async` v2.1+)**, **ADR-004 (hexagonal + import-linter)**, **ADR-005 (single-process asyncio kernel)**, **ADR-014 (data sources via clean abstraction)**, **ADR-017 (hybrid EODHD + IB streaming)**, **ADR-022 (TKAN freshness)** and **ADR-023 (TKAN artefact path)** in full. These are load-bearing for M2 design choices.
-7. **`docs/kb/ib_capability_matrix.md`** (KB-2) — focus on §1 (asset classes), §2 (order types), §5 (routing), §6 (market data tiers), §8 (account types).
-8. **`docs/kb/ib_pacing_spec.md`** (KB-3) — full read; M2 is where these limits become operational. The 50-msg/s throttle, historical-data pacing (≤60/10min, BID_ASK ×2), market-data subscription tiers, and the daily 23:45 ET restart are all M2 concerns.
-9. **`docs/kb/frameworks_survey.md`** (KB-4) — re-skim the `ib_async` adoption rationale and the patterns we lift from NautilusTrader.
-10. **`docs/inv/risk_checks.md`** (INV-4) — M2 doesn't widen the RC set (that's M4), but the M2 pipeline-level RC-08 negative test that was deferred at M1 close lands here when real-streaming bars introduce variable lag.
-11. **The M0+M1 substrate you are extending**: `docs/dd/domain_objects.md` (DD-1 STABLE), `docs/dd/config_schemas.md` (DD-3 DRAFT), `docs/inv/order_state_transitions.md` (INV-13 STABLE), `docs/inv/ports_adapters.md` (INV-6 STABLE — adapter status tracker now reflects M1 implementations), `docs/inv/domain_events.md` (INV-5 STABLE — `DomainEvent` widens with `AccountUpdate` + `ArtefactFreshnessWarning` at M2).
-12. **The M0+M1 code baseline**: skim `src/blive/{domain,strategy,sizing,risk,runtime}/*.py` and `src/blive/adapters/{paper,memory,clock,alert}/*.py` so you know what already exists. Then skim `tests/` so you know the M0+M1 test patterns; M2 tests should follow them.
+2. **`CONTEXT_INVENTORY.md`** — the registry of every knowledge artefact. Read it end-to-end. The §10 "Outstanding queue" tells you where the project is right now (M2-IB resumption is the active path).
+3. **`TASK_REGISTRY.md`** v0.3 — the Phase 1 plan. Today's work is **M2-IB.1** (substrate verification, then move to .2 if everything checks out). Read M2-IB in full. Skim M3 — note the M2-IB.4-vs-M3 consolidation note.
+4. **`docs/retros/M2-IG_retrospective.md`** — **read this in full**. It captures what the IG bridge built, what was deferred, and the §"Recommendations" section maps M2-IG's file structure 1:1 onto M2-IB equivalents. It is the load-bearing piece of context for this session.
+5. **`docs/retros/M0_retrospective.md`** and **`docs/retros/M1_retrospective.md`** — earlier retros for the substrate + pipeline patterns.
+6. **`REQUIREMENTS.md`** — re-read §5.2 (live market data + pacing), §5.7 (reconciliation: startup form is M2; continuous loop is M5), §6.1 (latency NFRs), §10 (12 IB-specific gotchas), §12 (operational model — Docker, IBC, daily TWS restart).
+7. **`docs/decisions/DECISIONS.md`** — read **ADR-002** (`ib_async` v2.1+), **ADR-004** (hexagonal + import-linter), **ADR-005** (single-process asyncio kernel), **ADR-014** (data sources), **ADR-017** (hybrid EODHD + IB streaming — note IG-streaming part is now archived), **ADR-021** (CAC.PA ETF on IB — **canonical Phase 1 strategy now reasserted**), **ADR-022** + **ADR-023** (TKAN), **ADR-027** (Sizer integer-share rounding for spot), **ADR-031** (token-bucket rate limiter — algorithm shipped, IB defaults pending ACCEPTED flip), **ADR-032** (instrument resolution policy: blive.Instrument ↔ IB Contract / ConID — pending ACCEPTED flip), **ADR-033** (AccountUpdate cadence), **ADR-034** (multi-broker registry — ACCEPTED at M2-IG.1; **the substrate that makes M2-IB easy**), **ADR-035** (secrets handling — applies to IB credentials too), **ADR-037** (`Instrument.tradability` — spot is the IB path), **ADR-039** (Phase 1 strategy under IG bridge — ACCEPTED but bridge-paused; not the canonical path).
+8. **`docs/kb/ib_capability_matrix.md`** (KB-2 v0.1.1) — read §1, 2, 5, 6, 8.
+9. **`docs/kb/ib_pacing_spec.md`** (KB-3 v0.1.1) — full read; numerical limits power the rate limiter's IB defaults table you'll write at M2-IB.2.
+10. **`docs/kb/operational_events.md`** (KB-8 v0.2) — read §1–§5 (IB-side) + §8.5 (IG-vs-IB comparison; the IG side is reference now).
+11. **`docs/kb/frameworks_survey.md`** (KB-4) — re-skim the `ib_async` adoption rationale.
+12. **`docs/inv/risk_checks.md`** (INV-4) — full set; M2-IB.4 work touches RC-08 / RC-09 / RC-12 / RC-13 (already implemented at M1) and starts to inform RC-05 / RC-06 (the M4 widening).
+13. **The substrate you are extending**: `docs/dd/domain_objects.md` (DD-1 STABLE v0.2 — `Instrument.tradability` field), `docs/dd/config_schemas.md` (DD-3 DRAFT v0.2 — top-level `broker` field), `docs/dd/instrument_dictionary.md` (DD-7 DRAFT v0.1 — IB-specific; STABLE flip at M2-IB.3 first Contract resolution), `docs/dd/event_schemas.md` (DD-2 DRAFT v0.1), `docs/dd/ig_instrument_dictionary.md` (DD-8 DRAFT v0.1 — IG analogue, **archived**; read for the parallel pattern), `docs/inv/order_state_transitions.md` (INV-13 STABLE), `docs/inv/ports_adapters.md` (INV-6 STABLE v0.3 — IG rows present, IB rows MISSING-PARKED → MISSING-ACTIVE), `docs/inv/domain_events.md` (INV-5 STABLE v0.2).
+14. **The M0+M1+M2-IG code baseline**: skim `src/blive/{domain,strategy,sizing,risk,runtime}/*.py` and `src/blive/adapters/{paper,memory,clock,alert,shared,ig}/*.py`. The M2-IG modules under `blive/adapters/ig/` are your **template** — IB modules at M2-IB.2 / .3 / .4 mirror their structure. Read at least: `blive/adapters/ig/{__init__,credentials,client,instrument_resolver,broker,market_data}.py` to see the pattern. Then skim `tests/unit/adapters/ig/test_*.py` for the test patterns; M2-IB tests should follow them.
+15. **The M2-IG bridge tags** (`git tag --list 'M2-*'`): `M2-substrate-IB.checkpoint` is your starting point; `M2-IG.{1-batch1,1-batch2,2-complete,3-broker,3-readside-complete,4-market-submit}` mark the bridge work for reference.
 
-When you finish warm-up, **before proposing any work**, reply to me with a 5-line summary:
+When you finish warm-up, **before proposing any work**, reply with a 5-line summary:
 
 ```
 Warm-up complete. I have read:
 - [list the artefacts you read]
 
-Project state: [G2 status, current milestone, key architectural commitments, what's already built]
+Project state: [G2 status, M2-IG closed at architectural surface, M2-IB ACTIVE,
+key architectural commitments from M2-IG that transfer]
 
-I propose to start M2 by: [first concrete action]
+I propose to start M2-IB.1 by: [first concrete action]
 ```
 
-Wait for my "go" before producing code.
+Wait for "go" before producing code.
 
 ---
 
-## Step 2 — Today's mission: Milestone M2 (IB Adapter — Read Side & Operational Foundation)
+## Step 2 — Today's mission: M2-IB resumption
 
-Per `TASK_REGISTRY.md` M2 (canonical source — do not paraphrase from this prompt, read the file).
+Per `TASK_REGISTRY.md` M2-IB (canonical source — do not paraphrase from this prompt, read the file).
 
-**Goal:** blive connects to IB Paper, reads positions / account values / market data; the operational stack (Docker, IBC, rate limiter) is in place. blive runs with `PaperBroker` for execution but reads real positions via `IBBroker`; the two views match.
+**Goal:** blive runs `tkan_v4_momentum_timing` 1× against `CAC.PA` ETF on IB Paper for ≥ 5 trading days, with end-of-period equity matching btest's reference within ±1 bps. The Phase 1 strategy reverts to the canonical [ADR-021](docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) ETF path.
 
-**Deliverables (9 items, condensed — full list in TASK_REGISTRY.md M2):**
+**Sub-milestones (as defined in TASK_REGISTRY.md M2-IB):**
 
-1. **IB Paper account verified** (operator action) — credentials available; `clientId` chosen; documented in a private `secrets/` location not under version control.
-2. **IB Gateway via Docker** (e.g. `gnzsnz/ib-gateway-docker`) operational — auto-restart on failure; pinned offline TWS installer per [KB-3 §5](./docs/kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events); IBC configured.
-3. **EODHD subscription verified** — CAC index daily history reachable via `eodhd://` test fetch.
-4. **`IBBroker` adapter — read methods** (`adapters/ib/broker.py`) — `connect()`, `disconnect()`, `positions()`, `account_snapshot()`, `open_orders()`, `events()`. All outbound calls pass through a token-bucket rate limiter (default 20 msg/sec global per [KB-3 §1](./docs/kb/ib_pacing_spec.md#1-the-50-msgsec-client-throttle)).
-5. **`IBMarketData` adapter — read methods** (`adapters/ib/market_data.py`) — `subscribe_bars()`, `historical_bars()`. Historical pacing per [KB-3 §2](./docs/kb/ib_pacing_spec.md#2-historical-data-pacing).
-6. **`EODHDDataSource`** registered in btest's data source registry (`adapters/eodhd/`) — `eodhd://...` URL scheme resolves to delayed/historical fetch.
-7. **`scripts/refresh_artefact.py`** (per [ADR-023](./docs/decisions/DECISIONS.md#adr-023--tkan-artefact-path-and-refresh-ownership)) — copy + checksum + record TKAN artefact freshness.
-8. **PaperBroker → real-IB-Paper read-mirror harness** — blive runs with PaperBroker for execution but reads positions via IBBroker; the two views match.
-9. **Reconnect logic** — disconnect / reconnect cycles tested by stopping/starting the IB Gateway container.
+- **M2-IB.1** — Substrate verification at the `M2-substrate-IB.checkpoint` commit. Confirm internal consistency post-M2-IG (KB-8 grew §8 IG events; INV-6 grew IG rows + cross-cutting `blive.adapters.shared.*` catalogue). **No code in this sub-milestone.** Touch only docs that need updates discovered during the read-through.
+- **M2-IB.2** — `blive.adapters.ib.client.IBClient` wrapping `ib_async.IB` (TCP socket + callback model — different transport from M2-IG.3's IGClient REST). + `blive.adapters.ib.credentials.IBCredentials` schema (host/port/clientId/account_id only). Module structure mirrors `blive.adapters.ig`.
+- **M2-IB.3** — `blive.adapters.ib.instrument_resolver` (Contract via `qualifyContractsAsync`); `blive.adapters.ib.broker.IBBroker` read methods; `blive.adapters.ib.market_data.IBMarketData` (subscribe_bars via `ib_async.reqMktData` / `reqHistoricalData`). `create_ib_broker` + `create_ib_market_data` factories registered in `broker_registry`. **ADR-031 + ADR-032 flip PROPOSED → ACCEPTED.** **DD-7 STABLE flip** on first successful Contract resolution. **KB-2 + KB-3 STABLE flip** when read-side has exercised the §1-§9 surfaces.
+- **M2-IB.4** — `IBBroker.submit/cancel/replace`; FSM events from `ib_async`'s `orderStatusEvent` / `execDetailsEvent` / `commissionReportEvent` callbacks; reconciliation on startup. **INV-14** (IB error codes) MISSING → DRAFT as observed-rejects accumulate.
+- **M2-IB.5** — Pipeline (refactor `paper_pipeline.py` to be broker-agnostic via `broker_registry`, OR new `ib_pipeline.py`). Run the strategy ≥ 5 trading days. G3-IB gate. Write `RETRO-M2-IB.md`.
 
-**Substrate transitions at M2 close:**
+**The M2-IG file structure is the IB blueprint.** Per [RETRO-M2-IG §"Recommendations"](docs/retros/M2-IG_retrospective.md#recommendations-for-next_promptmd-v04-m2-ib-resumption) the mapping is one-to-one. The cross-cutting `blive.adapters.shared.{rate_limiter, credentials}` and `blive.runtime.broker_registry` + the new import-linter contract `Broker registry isolation (ADR-034)` are reused unchanged.
 
-- `KB-2`, `KB-3` STABLE confirmed (or amended if reality-checked against the live IB API).
-- `INV-14` (IB error codes) **MISSING → DRAFT** as observed-rejects accumulate.
-- `KB-8` (operational events: daily TWS restart, IBC weekly token, holidays) **MISSING → DRAFT**.
-- `INV-5` widens with `AccountUpdate` (M2 row) and `ArtefactFreshnessWarning` (M2 row) — both already catalogued, now implemented.
-- `DD-7` (instrument dictionary — blive `Instrument` ↔ IB `Contract` / `ConID`) **MISSING → DRAFT**.
+**Substrate transitions at M2-IB close:**
 
-**Exit criteria (G3 gate):**
+- ADR-031 + ADR-032 PROPOSED → ACCEPTED on first IB exercise.
+- DD-7 DRAFT → STABLE on first successful Contract resolution.
+- KB-2 + KB-3 DRAFT v0.1.1 → STABLE when M2-IB.3 has exercised the §1-§9 surfaces.
+- INV-14 (IB error codes) MISSING → DRAFT at M2-IB.4 as rejects accumulate.
+- INV-5 widens with `AccountUpdate` (M2-IB.3) and `ArtefactFreshnessWarning` (M2-IB.3) — both already catalogued in [INV-5 §1](docs/inv/domain_events.md#1-event-catalogue), now implemented.
+- New M2-IB-specific ADRs are likely if `ib_async`'s asyncio integration patterns need formalising; expect 0-2 new ADRs at M2-IB.2.
+
+**Exit criteria (G3-IB gate):**
 
 - blive connects to IB Paper Gateway within 5 s of process start.
 - `positions()` returns the same set TWS UI shows (manual eyeball check).
-- Subscribe to CAC.PA bars; receive ≥ 100 ticks within RTH.
+- Subscribe to `CAC.PA` bars; receive ≥ 100 ticks within RTH.
 - Throttle test: simulate burst of 60 calls/sec; outbound rate stays ≤ 20 msg/sec.
 - Disconnect IB Gateway mid-session; blive detects within 30 s; reconnects when Gateway returns.
 - `refresh_artefact.py` round-trip: copy a fresh `pred_cache.pkl` from btest output; observe checksum recorded; observe RC-12 freshness check passes.
 
-**Operator-side prerequisites for G2 → M2 transition (verify before starting M2 code):**
+**Operator-side prerequisites for M2-IB.2 first handshake:**
 
-- IB Paper account commissioned; credentials accessible.
-- **EODHD subscription for CAC.PA** — ✓ verified at M1 close (2026-04-27): daily EOD + delayed real-time confirmed in tier. **Small open follow-up for M2:** the CAC 40 *index* ticker on EODHD is not `CAC.INDX` (404). When wiring `EODHDDataSource`, try `PX1.INDX` / `^FCHI`. Index feed is nice-to-have for parity-residual decomposition; ETF path (ADR-021) is sufficient on its own.
-- Deployment target chosen (Linux VM vs Windows host).
-- The G2 ±1 bps real-data parity test against `tkan_v4_momentum_timing` 1× × 252 days of CAC.PA history closed (the M1 retro left this PARTIAL — the pipeline is ready, what's missing is the EODHD CAC.PA fixture + the TKAN `pred_cache.pkl` artefact + the `cact_momentum.parquet` factor file). The G2 parity run is best done *after* the EODHD probe confirms CAC.PA daily history is in tier.
+- IB Paper account commissioned ✓ 2026-04-28; enabled 2026-04-29.
+- **Place IB connection params at `~/.blive/secrets/ib.env`** per [ADR-035](docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) using [`secrets/ib.env.example`](secrets/ib.env.example) as the template. **OPEN.**
+- **Decide deployment target** (Linux VM vs Windows host). Affects how IBC + `gnzsnz/ib-gateway-docker` get installed. **OPEN.**
+- **First IB Gateway handshake** from blive's host (TCP `127.0.0.1:4002` paper port reachable; `clientId` chosen). **OPEN.**
 
-If any of these are not yet ready, surface it in your warm-up summary and we'll resolve before code lands.
+If any are not yet ready, surface in your warm-up summary and we'll resolve before code lands.
 
 ---
 
@@ -96,22 +106,18 @@ If any of these are not yet ready, surface it in your warm-up summary and we'll 
 
 Every edit you make — to substrate or code — follows **CONTEXT_PROTOCOL §3**:
 
-- **Pre-edit:** READ the inventory → IDENTIFY SSOT for the fact you're changing → IMPACT-CHECK by walking `referenced_by`.
+- **Pre-edit:** READ the inventory → IDENTIFY SSOT → IMPACT-CHECK by walking `referenced_by`.
 - **During:** stable IDs in cross-refs (`KB-N`, `ADR-N`, `OQ-N`); no paraphrasing other artefacts (link instead); minimum-surface change.
-- **Post-edit:** bump `last_reviewed`; bump `version` if substantive; if status changed, update `CONTEXT_INVENTORY.md`; if the edit reflects a new architectural choice, write the corresponding **ADR** in the same commit; if it raises a question that can't be resolved in line, write the corresponding **OQ**.
+- **Post-edit:** bump `last_reviewed`; bump `version` if substantive; update `CONTEXT_INVENTORY.md` if status changed; new ADR for new architectural choices; new OQ for unresolvable questions.
 - **Commit messages** list every artefact touched, by stable ID.
 
-The **trivial-fix lane** (§3.4) exists for typos / formatting / link fixes. M2 is *not* a trivial-fix scenario; use the full lane.
+The **trivial-fix lane** (§3.4) exists for typos / formatting / link fixes. M2-IB.2 / .3 / .4 are *not* trivial-fix scenarios; use the full lane.
 
-If you find yourself about to make an architectural choice that isn't already captured in ADR-001..029, **stop**: write the proposed ADR with status `PROPOSED`, surface it to me, and wait for confirmation before committing. Likely M2 candidates for new ADRs:
+If you find yourself about to make an architectural choice that isn't already captured in ADR-001..039, **stop**: write the proposed ADR with status `PROPOSED`, surface it to me, and wait for confirmation before committing. Likely M2-IB candidates for new ADRs:
 
-- **OQ-030 resolution** — amend ADR-010 prose to acknowledge `SingleAssetRunner` (or settle on per-archetype dispatch as the canonical pattern). Pick at G2 review or early M2.
-- **Token-bucket rate limiter shape** — algorithmic choice (token bucket vs sliding window vs leaky bucket), per-strategy vs global accounting, persistence behaviour on restart.
-- **Instrument resolution policy** (DD-7) — how blive `Instrument(symbol, venue, currency, asset_class)` maps to IB `Contract`. Caching strategy for `ConID` lookups; fallback behaviour when ambiguous.
-- **`AccountUpdate` payload shape** (DD-2 entry) — what IB pushes into the snapshot subscription, and what blive normalises into a `DomainEvent` payload.
-- **EODHD adapter URL semantics** — the exact `eodhd://...` query grammar and how it resolves to EODHD's REST shape.
-
-If you discover a new question whose answer matters for M2, file an OQ rather than guessing.
+- **`ib_async` asyncio integration** — `ib_async`'s `IB.connectAsync()` runs its own event loop / tasks. blive's single-loop kernel ([ADR-005](docs/decisions/DECISIONS.md#adr-005--single-process-single-asyncio-loop-kernel-for-v1)) needs explicit thinking on how to share / nest. The IG REST path was simpler (httpx is asyncio-native). Expect this at M2-IB.2.
+- **OrderId persistence policy** — IB's master `clientId` owns the orderId counter ([KB-3 §4](docs/kb/ib_pacing_spec.md#4-order-id--multi-client)); blive must persist it across restarts. Where? In InMemoryPersistence for v1, SQLite at M4. Worth an ADR if the persistence shape isn't obvious.
+- **`MarketDataPort.subscribe_bars` over `ib_async`** — `reqMktData` (250 ms aggregated) vs `reqHistoricalData` for warm-up. Multi-instrument scaling. This is a small ADR or a §"Decisions" subsection in DD-7.
 
 Use the task-tracking primitives (TaskCreate / TaskUpdate / TaskList) to track multi-artefact edits as a coherent unit.
 
@@ -121,16 +127,16 @@ Use the task-tracking primitives (TaskCreate / TaskUpdate / TaskList) to track m
 
 These belong to later milestones; do **not** start them in this session:
 
-- `IBBroker` **write** methods (`submit`, `cancel`, `replace`) — those land at M3. M2 is read-side only.
-- Real-money trading. M2 is IB *Paper* only.
-- Full RiskEngine with all RCs (RC-01..RC-07, RC-10, RC-11 — the M2 subset stays at M1's RC-08/09/12/13) — M4.
-- SQLite persistence — M4.
-- Continuous reconciliation loop — M5. (Startup reconciliation diff per REQUIREMENTS §5.7 is in M2 scope; the 60s tick loop is M5.)
-- Web UI — M6.
-- Parity diagnostic — M7.
-- Kill-switch UI / REST surface (the `KillSwitch.clear()` confirmation token) — M4.
+- **IG bridge revival** — M2-IG is archived. The IG-specific code under `blive/adapters/ig/` stays untouched. Revival requires explicit operator action to re-open M2-IG.5 and the production Lightstreamer wrapper.
+- **Real-money trading.** M2-IB is IB *Paper* only.
+- **Full RiskEngine with all RCs** (RC-01..RC-07, RC-10, RC-11) — M4. M2-IB stays at M1's RC-08/09/12/13 subset.
+- **SQLite persistence** — M4.
+- **Continuous reconciliation loop** — M5. (Startup reconciliation per [REQUIREMENTS §5.7](REQUIREMENTS.md#57-reconciliation) is in M2-IB scope; the 60s tick loop is M5.)
+- **Web UI** — M6.
+- **Parity diagnostic** — M7.
+- **Kill-switch UI / REST surface** (the `KillSwitch.clear()` confirmation token) — M4.
 
-If you find an M2 design choice forces an early decision about M3+ architecture, capture it as an ADR (don't pre-build).
+If you find an M2-IB design choice forces an early decision about M3+ architecture, capture it as an ADR (don't pre-build).
 
 ---
 
@@ -140,38 +146,43 @@ Standard handoff per CONTEXT_PROTOCOL §8.3:
 
 1. Every artefact touched is **committed**, with the commit message listing artefacts by stable ID.
 2. Every new artefact created has frontmatter (id, title, status, owner, last_reviewed, version, sources, depends_on, referenced_by) and a row in `CONTEXT_INVENTORY.md`.
-3. Status changes (DRAFT → STABLE) are reflected both in the artefact itself and in `CONTEXT_INVENTORY.md`.
-4. Any new ADRs are in `docs/decisions/DECISIONS.md` and indexed in its top table.
-5. Any new OQs are in `docs/decisions/OPEN_QUESTIONS.md`.
-6. `TASK_REGISTRY.md` reflects M2 progress (which deliverables done, which blocked, why).
+3. Status changes (DRAFT → STABLE) reflected in artefact + CONTEXT_INVENTORY.
+4. New ADRs in `docs/decisions/DECISIONS.md` and indexed.
+5. New OQs in `docs/decisions/OPEN_QUESTIONS.md`.
+6. `TASK_REGISTRY.md` reflects M2-IB progress (which sub-milestones done, which blocked, why).
 
-**Additional milestone-close steps** per CONTEXT_PROTOCOL §8.3.1 (applies because this session closes M2):
+**Additional milestone-close steps** per CONTEXT_PROTOCOL §8.3.1 (applies if this session closes M2-IB):
 
-7. **Write a retrospective** at `docs/retros/M2_retrospective.md`, copying the structure from `docs/retros/_template.md`. Capture: G3 gate status (six exit criteria as a checklist), delivered-vs-plan, surprises, ADRs/OQs raised this milestone, substrate transitions, effort vs estimate, recommendations for the M3 NEXT_PROMPT. Status STABLE on first write; do not edit afterwards.
-8. **Write `NEXT_PROMPT.md` v0.4** targeting M3, informed by the retrospective. Most of this current prompt's warm-up files stay the same in v0.4; the Step 2 "Today's mission" is rewritten for M3 (IB write side + first live-paper run); Step 3 discipline reminders stay; Step 4 out-of-scope updates (M2 read methods drop off; `IBBroker` write methods *in* at M3; first 5-day live-paper run *in* at M3).
-9. **Report the G3 gate status back to me** as a checklist in chat — passed / partial / blocked, with reason on each line.
+7. **Write `docs/retros/M2-IB_retrospective.md`** per [`docs/retros/_template.md`](docs/retros/_template.md). Capture: G3-IB gate status (six exit criteria as a checklist), delivered-vs-plan, surprises, ADRs/OQs raised, substrate transitions, effort vs estimate, recommendations for the M3 / Phase-2-entry NEXT_PROMPT.
+8. **Write `NEXT_PROMPT.md` v0.5** targeting M3 / Phase 2 entry, informed by the retro.
+9. **Report the G3-IB gate status** as a checklist in chat — passed / partial / blocked, with reason on each line.
 
-If this session inadvertently runs into M3 work, **stop**: that violates the milestone-close discipline (substrate gets confused if one session straddles two milestones). Defer M3 to the next session.
+If this session inadvertently runs into M3 / Phase-2 work, **stop**: that violates the milestone-close discipline.
 
-If a deliverable is blocked by something I need to decide, **stop and ask** — do not guess. Substrate work is more valuable when it sits on confirmed decisions than when it ships fast on assumptions.
+If a deliverable is blocked by something I need to decide, **stop and ask** — do not guess.
 
 ---
 
-## Notes carried over from M1
+## Notes carried over from M2-IG
 
-The M1 retro flagged the following items as worth your attention from the start; they don't necessarily belong in M2 scope but they shape M2 design choices:
+The M2-IG retrospective flagged the following items as worth your attention from the start:
 
-- **`PortfolioEngine` is a free function `compute_target_weights_for_date()`, not a class.** ADR-010 / KB-1 prose still says "PortfolioEngine"; treat that as a known imprecision until OQ-030 resolves.
-- **Per-archetype dispatch (OQ-030).** TimingPortfolio strategies go through `quantdsl_backtest.runners.single_asset.SingleAssetRunner`; LongShortPortfolio strategies go through `compute_target_weights_for_date()`. M2 doesn't add archetypes but should not paint itself into a corner that assumes only one of the two dispatch paths.
-- **Pipeline-level RC-08 deferred from M1.** The M1 SimClock-vs-bar invariant left zero staleness delta; the unit test in `tests/unit/risk/test_checks.py` proves the check works. M2's real-streaming bars introduce variable lag — the missing pipeline-level RC-08 negative test should land here.
-- **`PaperMarketData` fixture format** (`open_time_utc`, `close_time_utc`, `open`, `high`, `low`, `close`, `volume`, optional `vwap`). Future fixtures must follow this schema; consider DD-8 *fixture_format* if a second consumer (the EODHD fetch script) lands.
-- **`KillSwitch.clear()` is unguarded in M1.** M4 adds the confirmation token. M2 doesn't need to touch it, but the IB-disconnect auto-arm path (REQUIREMENTS §5.5: disconnect > 30 s arms) is the first M2 caller of `KillSwitch.arm()`.
+- **Most cross-cutting work is reusable.** `blive.adapters.shared.{rate_limiter, credentials}` + `blive.runtime.broker_registry` + the import-linter contract `Broker registry isolation (ADR-034)` apply to IB unchanged. The M2-IG.2 commits are your scaffolding.
+- **Mirror the IG file layout for IB.** The IG modules at `blive/adapters/ig/{credentials, client, instrument_resolver, broker, market_data}.py` map 1:1 to IB equivalents at `blive/adapters/ib/`. Test files mirror under `tests/unit/adapters/ib/`.
+- **IB has its own stream model — no Lightstreamer abstraction needed.** `ib_async`'s `reqMktData` / `reqHistoricalData` + event subscriptions are asyncio-native (the lib uses `eventkit`). The M2-IG `LightstreamerSource` Protocol abstraction does *not* transfer; IB's stream directly produces bar/tick events through `ib_async`'s event system.
+- **Two ADRs (031, 032) flip PROPOSED → ACCEPTED on first IB exercise.** The algorithm (rate limiter) and policy (Instrument↔Contract) are already substrate; the IB-specific defaults / mappings are validated by the read side actually running.
+- **DD-7 STABLE flip** is the M2-IB.3 milestone marker for "the substrate is now empirically verified".
+- **`secrets/ib.env.example`** is already in repo (committed at M2-IG.2). Operator copies to `~/.blive/secrets/ib.env` and fills values.
+- **`PortfolioEngine` is a free function** (`compute_target_weights_for_date()`); the per-archetype dispatch is settled per [ADR-030](docs/decisions/DECISIONS.md#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010). The Phase 1 strategy uses `TimingPortfolio` → `SingleAssetRunner` (already wired in `paper_pipeline.py`).
+- **Pipeline-level RC-08 negative test** was unfeasible at M1 (SimClock-vs-bar invariant left zero staleness delta). At M2-IB.5 with real-streaming bars from `ib_async`, RC-08 will fire naturally on lag — write the missing pipeline-level test then.
+- **`KillSwitch.clear()` is unguarded in M1.** M4 adds the confirmation token. M2-IB doesn't need to touch it; the IB-disconnect auto-arm path ([REQUIREMENTS §5.5](REQUIREMENTS.md): disconnect > 30 s arms) is the first M2-IB caller of `KillSwitch.arm()`.
+- **`SingleAssetRunner` is batch-only.** It takes a full `price_close` series. For M2-IB.5 live-streaming setup, the pipeline driver evaluates the runner over a growing window. A per-day streaming variant would be a worthwhile btest-side enhancement; raise an OQ if it becomes friction at M2-IB.5.
 
 ---
 
 ## A note on this prompt itself
 
-This prompt is the previous milestone (M1)'s handoff to the next (M2). The successor (`NEXT_PROMPT.md` v0.4 targeting M3) is itself a Step-5 deliverable. The prompt is substrate; it evolves milestone-by-milestone, informed by each retrospective. ADR-024 (RETRO artefact type) and ADR-025 (CONTEXT_PROTOCOL §8.3.1 amendment) make this loop explicit.
+This prompt v0.4 was authored at M2-IG bridge close (2026-04-28), targeting M2-IB resumption. The successor (`NEXT_PROMPT.md` v0.5 targeting M3 / Phase 2 entry) is a Step-5 deliverable at M2-IB close.
 
 When in doubt about anything: re-read the protocol, ask, do not guess.
 

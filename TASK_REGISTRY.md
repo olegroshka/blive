@@ -3,8 +3,8 @@ id: TASK_REGISTRY
 title: Task Registry — Phase 1 Plan
 status: DRAFT
 owner: Oleg primary, Claude assist
-last_reviewed: 2026-04-27
-version: 0.2
+last_reviewed: 2026-04-28
+version: 0.3
 sources:
   - REQUIREMENTS.md §14
   - KB-5 §7
@@ -37,23 +37,23 @@ Layer-4 Plan artefact (per [CONTEXT_INVENTORY §1](./CONTEXT_INVENTORY.md#1-repr
 
 [ADR-013](./docs/decisions/DECISIONS.md#adr-013--v1-scope-etf-and-index-strategies-only) selects `tkan_v4_momentum_timing` 1× variant.
 
-**2026-04-27 amendment**: M2 splits into two paths per [ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) and the operator-driven IG bridge:
+**2026-04-28 amendment**: M2 history:
 
-- **M2-IB path** — original Phase 1 plan against IB Paper. **PARKED** at the [`M2-substrate-IB.checkpoint`](./docs/decisions/DECISIONS.md) commit pending IB account reopening.
-- **M2-IG path** — IG demo bridge running the same strategy against a CAC 40 CFD on IG Markets. **ACTIVE**.
+- **M2-IG path** (operator-driven IG demo bridge while IB Paper was unavailable) — **CLOSED at architectural surface 2026-04-28**. Sub-milestones .1 substrate / .2 cross-cutting infra / .3 read side / .4 minimum-viable submit shipped (7 tags placed; 359 tests; ADR-030/033/034..039 ACCEPTED). Sub-milestone .5 strategy run + production Lightstreamer wrapper DEFERRED (operator pivoted to M2-IB resumption when the IB Paper account became available). See [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md). The IG-specific code (5 modules + Lightstreamer abstraction + KB-16/17 + DD-8) is preserved in repo for future bridge revival; no scheduled revival.
+- **M2-IB path** (canonical Phase 1) — **ACTIVE 2026-04-28**. IB Paper account commissioned 2026-04-28; enabled 2026-04-29. Resumes from the [`M2-substrate-IB.checkpoint`](./docs/decisions/DECISIONS.md) commit. Architecturally scaffolded by the M2-IG cross-cutting work (broker registry, shared rate limiter, shared credentials, `Instrument.tradability` field) — IB read+write modules mirror IG's file structure 1:1 per RETRO-M2-IG §"Recommendations".
 
-Phase 1 specifics:
+Phase 1 specifics (canonical M2-IB path; M2-IG bridge variant **ARCHIVED**):
 
-| Specifier | M2-IB path (PARKED) | M2-IG bridge path (ACTIVE) | Source |
-|-----------|---------------------|----------------------------|--------|
-| Tradable instrument | `CAC.PA` (Lyxor CAC 40 UCITS ETF, XPAR) | CAC 40 cash CFD on IG (epic TBD; first IG handshake confirms — likely `IX.D.CAC40.CASH.IP`) | [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) (PAUSED for bridge) / ADR-039 (forthcoming, M2-IG.1 batch 2) |
-| Tradability | spot (ETF shares; ADR-027 integer-share rounding) | CFD (fractional contracts; per-instrument precision) | ADR-037 (forthcoming, M2-IG.1 batch 2) |
+| Specifier | M2-IB path (ACTIVE) | M2-IG bridge variant (ARCHIVED) | Source |
+|-----------|---------------------|----------------------------------|--------|
+| Tradable instrument | `CAC.PA` (Lyxor CAC 40 UCITS ETF, XPAR) | CAC 40 cash CFD on IG (epic TBD if revived) | [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) / [ADR-039](./docs/decisions/DECISIONS.md#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) (bridge-paused; ACCEPTED but not the canonical Phase 1 strategy) |
+| Tradability | `spot` (ETF shares; ADR-027 integer-share rounding) | `cfd` (fractional contracts) | [ADR-037](./docs/decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet) |
 | NAV slice | 5–10% of total account, hard cap 10% | same | [ADR-020](./docs/decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10) |
 | TKAN freshness window | 30d hard (RC-12 block); 21d warning | same | [ADR-022](./docs/decisions/DECISIONS.md#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning) |
 | TKAN artefact path | `~/.blive/artefacts/{strategy_id}/{model_name}/pred_cache.pkl` | same | [ADR-023](./docs/decisions/DECISIONS.md#adr-023--tkan-artefact-path-and-refresh-ownership) |
-| TKAN refresh | manual via `scripts/refresh_artefact.py` (M2-IB deliverable, parked) | same script reused (broker-agnostic) | ADR-023 |
-| Parity envelope | ±1 bps target (G2-IB) | TBD on first replay; CFD financing-cost variability rules out ±1 bps | ADR-039 (forthcoming) |
-| Credentials | IB Gateway (no password; clientId) | `~/.blive/secrets/ig.env` (api key + user + pwd + account id) | [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) |
+| TKAN refresh | manual via `scripts/refresh_artefact.py` (M2-IB.4 deliverable) | same script (broker-agnostic) | ADR-023 |
+| Parity envelope | ±1 bps target (G2-IB / G3-IB) | (CFD-specific envelope, not exercised) | ADR-021 / ADR-039 |
+| Credentials | `~/.blive/secrets/ib.env` (host/port/clientId/account_id only — IB Gateway + IBC handle username/password) | (would have been `~/.blive/secrets/ig.env` if revived) | [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) |
 
 ---
 
@@ -124,11 +124,23 @@ Phase 1 specifics:
 
 ---
 
-### M2-IB — IB Adapter (Read Side) & Operational Foundation — **PARKED 2026-04-27**
+### M2-IB — IB Adapter (Read + Write Side) & First Live (Paper) Strategy Run — **ACTIVE 2026-04-28**
 
-**Status:** PARKED at [`M2-substrate-IB.checkpoint`](./docs/decisions/DECISIONS.md) pending operator's IB Paper account reopening. Substrate phase complete (ADR-030..033 PROPOSED, DD-7/DD-2/KB-8 DRAFT, KB-2/KB-3 v0.1.1 review pass); implementation phase not started. Resumes when operator confirms IB account ready and the M2-IG bridge has stabilised.
+**Status:** ACTIVE — IB Paper account commissioned 2026-04-28; enabled 2026-04-29. Substrate at [`M2-substrate-IB.checkpoint`](./docs/decisions/DECISIONS.md). Cross-cutting infra (broker registry, shared rate limiter, shared credentials, `Instrument.tradability` field) shipped via the M2-IG bridge work and reuses unchanged. Architecturally scaffolded — implementation now mirrors the M2-IG file structure 1:1 per [RETRO-M2-IG §"Recommendations"](./docs/retros/M2-IG_retrospective.md#recommendations-for-next_promptmd-v04-m2-ib-resumption).
 
-**Goal:** blive connects to IB Paper, reads positions / account values / market data; the operational stack (Docker, IBC, rate limiter) is in place.
+**Goal:** blive runs `tkan_v4_momentum_timing` 1× against `CAC.PA` ETF on IB Paper for ≥ 5 trading days, with end-of-period equity matching btest's reference within ±1 bps (G2-IB) and the operational stack (Docker, IBC, rate limiter, credentials, broker registry) operational.
+
+**Sub-milestones:**
+
+- **M2-IB.1 — Substrate verification.** Confirm the substrate at `M2-substrate-IB.checkpoint` is internally consistent post-M2-IG (most rows are; KB-8 grew §8 IG events; INV-6 grew IG rows + cross-cutting `blive.adapters.shared.*` catalogue). No code in this sub-milestone.
+- **M2-IB.2 — IBClient + IBCredentials.** New `blive.adapters.ib.client` wrapping `ib_async.IB` (TCP socket + callback model — different transport from IGClient's REST). connect / disconnect / submit / cancel / event subscription. Rate-limited via `blive.adapters.shared.rate_limiter` with [KB-3 §9](./docs/kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults) IB defaults (20 msg/s global; 5/s per-strategy). New `blive.adapters.ib.credentials` (schema is simpler than IG — no API key, no password; just host/port/clientId/account_id per `secrets/ib.env.example` from ADR-035).
+- **M2-IB.3 — IBInstrumentResolver + IBBroker read + IBMarketData.** Mirror M2-IG.3 file structure. IBInstrumentResolver: `Instrument` ↔ IB `Contract` via `qualifyContractsAsync` per [DD-7 §4](./docs/dd/instrument_dictionary.md). IBBroker read: positions / account_snapshot / open_orders / events. IBMarketData: subscribe_bars via `ib_async.reqMktData` / `reqHistoricalData` (no Lightstreamer abstraction — IB has its own stream model; the `MarketDataPort.subscribe_bars` shape stays identical from the consumer's perspective). Wire `create_ib_broker` + `create_ib_market_data` into `broker_registry`. **ADR-031 + ADR-032 flip PROPOSED → ACCEPTED** on first IB exercise. **DD-7 STABLE flip** on first successful Contract resolution. **KB-2 + KB-3 STABLE flip** when M2-IB.3 has exercised the §1-§9 surfaces against IB Paper.
+- **M2-IB.4 — IBBroker write side + reconciliation.** submit / cancel / replace via `ib_async` order placement. FSM event emission driven by `ib_async`'s `orderStatusEvent` / `execDetailsEvent` / `commissionReportEvent` callbacks (event-driven, unlike IG's confirms-poll). Reconciliation on startup: `reqAllOpenOrders` + `reqPositions` per [REQUIREMENTS §5.7](./REQUIREMENTS.md#57-reconciliation). **INV-14** (IB error codes) MISSING → DRAFT as observed-rejects accumulate. Optionally consolidate with the original M3 plan; see "M2-IB.4 vs M3" note below.
+- **M2-IB.5 — Strategy run + RETRO-M2-IB.** Pipeline (refactor `paper_pipeline.py` to be broker-agnostic via `broker_registry`, OR new `ib_pipeline.py` analogue of the deferred M2-IG.5 plan). Run `tkan_v4_momentum_timing` 1× against IB Paper for ≥ 5 trading days. G3-IB gate criteria validated. Write `RETRO-M2-IB.md` per [CONTEXT_PROTOCOL §8.3.1](./CONTEXT_PROTOCOL.md).
+
+**M2-IB.4 vs M3 note**: the original M3 milestone (per TASK_REGISTRY v0.1.x) was "IB Adapter (Write Side) & First Live (Paper) Strategy". With the M2-IG bridge having shipped MARKET-submit at M2-IG.4 + the multi-broker registry pattern in place, the cleanest plan is to consolidate write side into M2-IB.4 and let M2-IB.5 be the strategy run. M3 in the v0.3 sketch becomes Phase 2 entry / second strategy slot rather than "IB write side". Re-evaluate at M2-IB.3 close.
+
+**Goal (read-side, restated from earlier scope):** blive connects to IB Paper, reads positions / account values / market data; the operational stack (Docker, IBC, rate limiter) is in place.
 
 **Deliverables:**
 
@@ -159,13 +171,15 @@ Phase 1 specifics:
 
 ---
 
-### M2-IG — IG Demo Bridge: Multi-Broker Foundation & First Strategy Run — **ACTIVE 2026-04-27**
+### M2-IG — IG Demo Bridge — **ARCHIVED 2026-04-28** (architectural-surface close; G3-IG NOT_REACHED)
 
-**Status:** ACTIVE — operator-driven bridge while IB Paper account is being reopened. Exercises the multi-broker abstraction layer ([ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004)) end-to-end against a real venue ([IG Markets](https://labs.ig.com/)).
+**Status:** **CLOSED at architectural surface 2026-04-28** per [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md). The G3-IG gate criteria were NOT REACHED — this was an operator-driven close after the IB Paper account became available, not a gate failure. The M2-IG sub-milestones .1 (substrate) / .2 (cross-cutting infra) / .3 (read side) / .4 (minimum-viable submit) shipped at architectural surface (7 tags placed: `M2-IG.1-batch1`, `M2-IG.1-batch2`, `M2-IG.2-complete`, `M2-IG.3-broker`, `M2-IG.3-readside-complete`, `M2-IG.4-market-submit`); **never exercised against IG demo**. M2-IG.5 (strategy run + 5-day demo) and the production Lightstreamer wrapper are explicitly **DEFERRED with no scheduled revival**.
 
-**Goal:** blive runs `tkan_v4_momentum_timing` 1× against CAC 40 CFD on IG demo for ≥ 5 trading days, demonstrating the multi-broker abstraction layer is sound and the codebase can support N>1 broker concurrently.
+The IG-specific code (modules under `blive/adapters/ig/`, KB-16, KB-17, DD-8, ADR-036/038/039) is preserved as durable reference. If the bridge is ever revived, the work is reusable. The cross-cutting work — broker registry, shared rate limiter, shared credentials, `Instrument.tradability` field — applies directly to M2-IB resumption (this was the bridge's primary architectural dividend, captured in RETRO-M2-IG §"What the IG bridge bought us").
 
-**Why this is bigger than M2-IB**: M2-IB was scoped to read-side + operational foundation; the strategy run was deferred to M3-IB. M2-IG covers read + write + strategy run because the bridge needs to *actually trade* — the operator's intent is "exercise the broker abstraction with a real venue", which requires going through to a closed-loop strategy run.
+**Original goal (not achieved):** blive runs `tkan_v4_momentum_timing` 1× against CAC 40 CFD on IG demo for ≥ 5 trading days.
+
+**Why M2-IG was bigger than M2-IB scope-wise**: M2-IG covered read + write + strategy run as a single unit because the bridge's primary purpose was end-to-end validation of the abstraction. The M2-IB resumption splits that: read side (M2-IB.3) + write side (M2-IB.4) + strategy run (M2-IB.5).
 
 **Sub-milestones:**
 
@@ -260,9 +274,9 @@ A quality gate is a checkpoint at the boundary between milestones. The gate must
 | **G0** (M0 entry) | ADR-001..023 stable (✓ ADR-020..023 added 2026-04-26) | **PASSED 2026-04-26** |
 | **G1** (M0 → M1) | DD-1, INV-13 STABLE; PaperBroker round-trip green; import-linter passing | **PASSED 2026-04-26** (see [RETRO-M0](./docs/retros/M0_retrospective.md)) |
 | **G2** (M1 → M2) | btest equity-match within ±1 bps; M1 deliverables complete; operator-side prereqs verified | **PARTIAL 2026-04-27** (see [RETRO-M1](./docs/retros/M1_retrospective.md)) — pipeline machinery + 175 tests green; real-data ±1 bps run deferred to operator EODHD CAC.PA + TKAN artefact run |
-| **G3-IB** (M2-IB → M3) | IB Paper read-mirror passes; throttle + reconnect tests green | Oleg — **DEFERRED 2026-04-27** (M2-IB PARKED) |
-| **G3-IG** (M2-IG → M2-IG.5 close) | IG demo read+write working; Lightstreamer + REST throttle green; session-token auto-refresh tested; `tkan_v4_momentum_timing` 1× runs ≥ 5 trading days on IG demo with directional alignment | Oleg — **ACTIVE** |
-| **G4** (M3 → M4 / Phase 2 entry) | All six M3 exit criteria met; PHASE_2_READINESS audit drafted | Oleg |
+| **G3-IB** (M2-IB → M2-IB.5 close) | blive connects to IB Paper within 5s; positions match TWS UI; CAC.PA bars receive ≥ 100 ticks within RTH; throttle test (60 calls/sec → ≤ 20 msg/sec); reconnect within 30s after Gateway restart; `refresh_artefact.py` round-trip works | Oleg — **ACTIVE 2026-04-28** |
+| **G3-IG** (M2-IG → M2-IG.5 close) | IG demo read+write working; Lightstreamer + REST throttle green; session-token auto-refresh tested; `tkan_v4_momentum_timing` 1× runs ≥ 5 trading days on IG demo with directional alignment | Oleg — **NOT_REACHED 2026-04-28** (operator-driven bridge close before strategy run; not a gate failure — see [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md)) |
+| **G4** (M3 → M4 / Phase 2 entry) | All M2-IB.5 strategy-run criteria met; PHASE_2_READINESS audit drafted | Oleg — re-scoped at M2-IB.5 close (M3 may consolidate with M2-IB.4 per the M2-IB.4-vs-M3 note above) |
 
 ---
 
@@ -272,11 +286,17 @@ Risks specific to Phase 1 (broader risks live in [REQUIREMENTS](./REQUIREMENTS.m
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| IB Paper account reopen takes longer than expected | Medium | M2-IB PARKED for longer | M2-IG bridge active in parallel; multi-broker registry ([ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004)) means M2-IB substrate stays valid; no rework on IB return |
-| IG demo session token expires unexpectedly mid-run | Medium | M2-IG outage | Auto-reauth on 401 / token-rejected; tested explicitly per G3-IG criterion |
-| CAC 40 CFD financing-cost variability blows past parity envelope | Medium | M2-IG.5 envelope re-derive | ADR-039 (forthcoming) commits to "directional alignment + envelope set on first replay", not the M2-IB ±1 bps target |
-| `trading_ig` / `httpx` Lightstreamer client maturity | Medium | M2-IG.3 friction | Roll-our-own per [ADR-036](./docs/decisions/DECISIONS.md) (forthcoming) keeps the surface narrow; complexity localised to one module |
-| IG demo CAC 40 CFD epic differs from `IX.D.CAC40.CASH.IP` guess | Low | M2-IG.5 wiring | First IG handshake confirms; epic resolution via `/markets?searchTerm=CAC` |
+| ~~IB Paper account reopen takes longer than expected~~ ✓ Resolved 2026-04-28 (account commissioned; enabled 2026-04-29) | — | — | — |
+| ~~IG demo session token expires unexpectedly mid-run~~ ✓ Archived with M2-IG bridge close | — | — | — |
+| ~~CAC 40 CFD financing-cost variability blows past parity envelope~~ ✓ Archived with M2-IG bridge close | — | — | — |
+| ~~`lightstreamer-client-lib` callback-driven API maturity~~ ✓ Archived; abstraction layer captured the contract; production wrapper deferred | — | — | — |
+| ~~IG demo CAC 40 CFD epic differs from `IX.D.CAC40.CASH.IP` guess~~ ✓ Archived with M2-IG bridge close | — | — | — |
+| Docker / IBC setup fragile on Windows host | Medium | M2-IB.2 friction | Plan Linux-host fallback; document discoveries in [KB-8](./docs/kb/operational_events.md) §1-§3 (IB-side) |
+| btest version drift breaks blive imports during M2-IB | Medium | rebuild | Pin btest commit; CI smoke-imports check (M0 deliverable) catches early; coordination policy in [ADR-010](./docs/decisions/DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) |
+| TKAN artefact retrained mid-Phase-1 produces non-stationary signal | Low | strategy underperforms | Acceptable on paper; revisit at G3-IB / G4 |
+| Parity envelope between CAC.PA price-return and CACT total-return wider than expected | High | documentation only | Document; do not block M2-IB.5; feed into M7 parity diagnostic design |
+| `ib_async`'s callback model bridges to asyncio cleanly | Low | M2-IB.2 friction | `ib_async` is asyncio-native (per [ADR-002](./docs/decisions/DECISIONS.md#adr-002--adopt-ib_async-v21-as-wire-level-ib-driver)); thinner adapter than the IG Lightstreamer wrapper would have needed |
+| IB daily TWS restart at 23:45 ET disrupts the ≥ 5-day strategy run | Medium | M2-IB.5 friction | First-class operational event per [KB-3 §5](./docs/kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events) + [KB-8 §1](./docs/kb/operational_events.md); engine pauses + reconciles + resumes per [REQUIREMENTS §5.7](./REQUIREMENTS.md#57-reconciliation) |
 | EODHD CAC index coverage insufficient | Low (verified) | M2 redo | **Verified 2026-04-27** (M1-close lane). EODHD probe ran with operator-supplied key: `CAC.PA` daily EOD (2024-12 sample) returns full OHLC + adjusted_close + volume — primary tradable per [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) covered. `CAC.PA` real-time quote returns delayed-tier data (sufficient for Phase-1 EOD strategy). Open small follow-up for M2: the CAC 40 *index* ticker is not `CAC.INDX` (404 from EODHD); when wiring `EODHDDataSource`, try `PX1.INDX` / `^FCHI`. Index feed is nice-to-have for parity-residual decomposition, not a G2 blocker. |
 | Docker / IBC setup fragile on Windows host | Medium | M2 friction | Plan Linux-host fallback; document discoveries in KB-8 |
 | btest version drift breaks blive imports during Phase 1 | Medium | rebuild | Pin btest minor; CI smoke-imports check (M0 deliverable); coordination policy in [ADR-010](./docs/decisions/DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) |
@@ -290,11 +310,11 @@ Risks specific to Phase 1 (broader risks live in [REQUIREMENTS](./REQUIREMENTS.m
 Items still requiring Oleg's input or action:
 
 1. ~~Confirm or override OQ-024..OQ-027 defaults.~~ ✓ Done 2026-04-26 (ADR-020..023).
-2. ~~**Verify IB Paper account access** (credentials, port, `clientId`).~~ **PARKED 2026-04-27** — IB Paper account being reopened; M2-IB on hold. M2-IG bridge active in parallel.
-3. ~~**Verify EODHD All-in-One subscription** covers CAC index daily history.~~ ✓ Done 2026-04-27 (M1 close).
-4. ~~**Verify IG demo account credentials**.~~ ✓ Done 2026-04-27 (operator supplied API key, username, password, account id). Loading discipline per [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) — operator places credentials in `~/.blive/secrets/ig.env` before M2-IG.3 connects to IG demo.
-5. **Decide deployment target** (Linux VM vs Windows host) — less critical for M2-IG (HTTPS only, no Docker / IBC dependency). Required for M2-IB resumption.
-6. **Operator review of M2-IG.1 batch 1 ADRs** (ADR-034, ADR-035) — current open item; see [NEXT_PROMPT.md](./NEXT_PROMPT.md) (current session surfacing).
+2. ~~**Verify IG demo account credentials**.~~ ✓ Done 2026-04-27 (M2-IG.1). Now archived with the M2-IG bridge close.
+3. ~~**Verify IB Paper account access**.~~ ✓ Done 2026-04-28: account commissioned, enabled 2026-04-29.
+4. **Place IB connection params at `~/.blive/secrets/ib.env`** per [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) using [`secrets/ib.env.example`](./secrets/ib.env.example) as the template. Required before M2-IB.2 first handshake. Note: IB Gateway / IBC handle username+password; blive only needs `IB_HOST`, `IB_PORT`, `IB_CLIENT_ID`, `IB_PAPER_ACCOUNT_ID`. **OPEN.**
+5. **Decide deployment target** (Linux VM vs Windows host). Required for M2-IB.2 Docker / IBC setup. **OPEN.**
+6. **First IB Gateway handshake** from blive's host (TCP `127.0.0.1:4002` paper port reachable; `clientId=1` chosen). Operator verifies before M2-IB.2 code starts. **OPEN.**
 
 ---
 
@@ -318,3 +338,4 @@ Items still requiring Oleg's input or action:
 - **v0.1.2 (2026-04-26)** — **M0 closed; G1 gate PASSED**. All ten M0 deliverables landed (scaffolding, DD-1 STABLE, INV-13 STABLE, INV-6 DRAFT, INV-5 DRAFT, domain layer, paper / in-memory / clock adapters, tests, import-linter contract + negative test, CONTEXT_INVENTORY sync). 113 tests green; mypy strict clean; both contracts KEPT. See [RETRO-M0](./docs/retros/M0_retrospective.md). Next milestone is M1 — see [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.2.
 - **v0.1.3 (2026-04-27)** — **M1 closed; G2 gate PARTIAL.** All seven M1 deliverables landed (smoke-import, strategy loader, btest engine wiring via `SingleAssetRunner` per OQ-030, Sizer with ADR-027 rounding, RiskEngine M1-subset RC-08/09/12/13, paper-mode pipeline, DD-3 DRAFT). Plus PaperMarketData / LogAlert / PaperBroker.replace / RiskBreach domain-event relocation. ADR-027..029 ACCEPTED; OQ-030 raised; INV-5/INV-6 promoted to STABLE. 175 tests green; mypy strict clean; both contracts KEPT. See [RETRO-M1](./docs/retros/M1_retrospective.md). G2 ±1 bps real-data parity run is operator-deferred (needs EODHD CAC.PA fixture + TKAN artefact + momentum factor). M2 begins after G2 closure — see [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.3.
 - **v0.2 (2026-04-27)** — **M2 split into M2-IB (PARKED) and M2-IG (ACTIVE)** per option (S) of operator-driven IG-demo-bridge pivot. Substrate authored: cross-cutting [ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) (multi-broker registry pattern; extends ADR-004) and [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) (secrets handling discipline; ~/.blive/secrets/{broker}.env + redaction list) — both PROPOSED; first-batch IG-bridge substrate. Phase 1 specifics table grew an "M2-IG bridge path" column (CAC 40 CFD on IG demo; ADR-021 PAUSED for the bridge). Quality Gates table split G3 → G3-IB (DEFERRED) + G3-IG (ACTIVE). Risk register grew IG-specific rows. Open dependencies cleaned up for IG bridge. M2-IG sub-milestones .1 (substrate) / .2 (cross-cutting infra) / .3 (read side) / .4 (write side) / .5 (strategy run + retro) defined.
+- **v0.3 (2026-04-28)** — **M2-IG bridge CLOSED at architectural surface; M2-IB UNPARKED to ACTIVE.** Operator pivot: IB Paper account commissioned 2026-04-28 (enabled 2026-04-29). [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md) STABLE-on-first-write captures the bridge close: ~2 sessions delivered M2-IG.1 substrate + M2-IG.2 cross-cutting infra + M2-IG.3 read side + M2-IG.4 minimum-viable submit (7 tags placed; 359 tests). M2-IG.5 strategy run + production Lightstreamer wrapper DEFERRED with no scheduled revival. M2-IB resumption defined with sub-milestones M2-IB.1 (substrate verification) / .2 (IBClient + IBCredentials) / .3 (IBInstrumentResolver + read side + IBMarketData) / .4 (write side + reconciliation) / .5 (strategy run on IB Paper + RETRO-M2-IB). M2-IG section relabelled ARCHIVED (G3-IG NOT_REACHED, operator-driven close not gate failure). Phase 1 specifics table reverts to ADR-021 ETF path as canonical; ADR-039 CFD variant stays ACCEPTED but bridge-paused. Quality Gates: G3-IB ACTIVE; G3-IG NOT_REACHED. Risk register: IG-specific rows archived; IB-specific rows reasserted. Open dependencies updated: IG operator-side items closed; IB connection params + deployment target + first IB Gateway handshake opened. NEXT_PROMPT.md v0.4 drafted to target M2-IB.
