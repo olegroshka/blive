@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-04-28
-version: 0.10
+version: 0.11
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -1700,6 +1700,67 @@ Three things change under the bridge:
 
 ---
 
+## ADR-040 — Phase 1 deployment target: Windows host with native IB Gateway
+
+- **status:** ACCEPTED
+- **date:** 2026-04-28
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** —
+
+### Context
+
+[TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md) requires deciding the deployment target before M2-IB.3 first wire-level handshake. [REQUIREMENTS §12](../../REQUIREMENTS.md#12-operational-model) commits to "Linux preferred, Windows supported (the user runs Windows 11 daily; production target is Linux VM/box)" but does not pin the Phase 1 dev/paper-mode choice.
+
+The decision matters because it drives:
+
+- Whether IB Gateway runs in Docker (`gnzsnz/ib-gateway-docker` per [REQUIREMENTS §12](../../REQUIREMENTS.md#12-operational-model) + [KB-3 §5](../kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events)) or as a native Windows process.
+- Whether IBC ([KB-3 §5](../kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events)) automates the daily 23:45 ET TWS restart or the operator handles it manually.
+- How the [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) `~/.blive/secrets/` discipline maps onto Windows NTFS ACLs vs Linux `chmod 600`.
+- The latency / reliability profile of the M2-IB.5 ≥ 5-trading-day strategy run.
+
+### Decision
+
+For Phase 1 (M2-IB through M3 / G4 gate) use the **Windows host with native IB Gateway**, no Docker, no IBC. Concretely:
+
+- Operator installs IB Gateway from the IB website (the "offline" installer per [KB-3 §5](../kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events) recommendation).
+- Operator launches IB Gateway manually, logs in to the paper account, leaves the process running.
+- blive (running natively on Windows under `uv`) connects via TCP `127.0.0.1:4002`.
+- Daily 23:45 ET restart is **operator-managed** for Phase 1: blive's [REQUIREMENTS §5.7](../../REQUIREMENTS.md#57-reconciliation) reconciliation loop already handles disconnect-then-reconnect; the operator just needs to log Gateway back in once a day during the M2-IB.5 5-day run.
+- File permissions: `~/.blive/secrets/ib.env` lives at `C:\Users\olegr\.blive\secrets\ib.env`. Per-user-only NTFS ACL is the Windows analogue of `chmod 600`; Phase 1 relies on the file being inside the user profile (already access-controlled by the OS for non-admin processes). The full ACL hardening lands when [`RUNBOOK.md`](../../RUNBOOK.md) gets authored at M5 per [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) §"Consequences".
+
+Linux VM / Docker / IBC are **deferred to the production cutover at M8+** ([REQUIREMENTS §14](../../REQUIREMENTS.md) M8: "Hardening: ... ops runbook ... 2-week unattended paper trade clean").
+
+### Alternatives Considered
+
+1. **Linux VM with Docker (`gnzsnz/ib-gateway-docker` + IBC).** Rejected for Phase 1: operationally more standard and what the production cutover wants, but adds VM-host overhead, Docker-Desktop install, container-volume mounts for credentials, and a Linux-side ops layer that the user has not yet picked. The complexity is appropriate when the cutover to live trading is in scope (M8+); paying it now buys nothing for paper-mode dev. [REQUIREMENTS §12](../../REQUIREMENTS.md#12-operational-model)'s "Linux preferred" guidance applies to the production target, not the Phase 1 paper-mode workflow.
+2. **WSL2 with Docker on Windows.** Considered as a hybrid. Lower friction than a full VM but still adds a container layer + IBC config. Worth re-evaluating at M5 when the operational story matures; not needed for Phase 1.
+3. **TWS Desktop instead of IB Gateway.** Rejected: TWS has the same daily-restart and pacing characteristics ([KB-2 §1](../kb/ib_capability_matrix.md#1-connectivity-surface)), heavier UI, no operational benefit for headless-style automation. Gateway is the standard for API-only workflows.
+
+### Consequences
+
+- **Positive:** Lowest possible setup friction for the M2-IB.3 first handshake. Operator runs IB Gateway, fills in `~/.blive/secrets/ib.env`, runs blive's smoke probe — three steps, no VM / Docker / IBC config.
+- **Positive:** No new dependencies or container-runtime requirements. blive runs the same way it has since M0 (`uv run`, native Windows process).
+- **Positive:** Decision is reversible — switching to a Linux VM at M8 doesn't invalidate Phase 1 work; the abstraction layers (broker registry, IBClient, IBCredentials) are deployment-target-agnostic.
+- **Negative:** Daily 23:45 ET TWS-restart window requires operator attention during the M2-IB.5 ≥ 5-trading-day strategy run. Acceptable for Phase 1 (paper, single-operator, dev workflow); blive's reconciliation handles the disconnect/reconnect transient correctly per [REQUIREMENTS §5.7](../../REQUIREMENTS.md#57-reconciliation).
+- **Negative:** NTFS-ACL credential-file hardening is deferred (per [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) "Consequences" already flagged for M5). Phase 1 risk is bounded by the file living inside the user profile and the system being a single-operator workstation.
+- **Negative:** Re-doing the deployment at M8 will require a fresh setup pass on the Linux VM (Docker + IBC + secret-volume-mounts + systemd / `restart: always`); documented but not pre-built.
+- **Follow-ups:**
+  - M2-IB.3 first-handshake validation runs on the Windows native target.
+  - [`RUNBOOK.md`](../../RUNBOOK.md) (M5) documents the Linux VM / Docker path as the production target with concrete steps.
+  - Re-evaluate at the [G4 → Phase 2 readiness audit](../../CONTEXT_PROTOCOL.md#832-phase-boundary-rule) whether Phase 2 strategies justify the Linux migration earlier.
+  - The existing [TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md) "Decide deployment target" item is closed by this ADR.
+
+### Cross-References
+
+- [REQUIREMENTS §12](../../REQUIREMENTS.md#12-operational-model) — operational model (Linux preferred for production).
+- [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) — secrets handling (NTFS ACL note).
+- [KB-3 §5](../kb/ib_pacing_spec.md#5-daily-and-weekly-operational-events) — daily TWS restart + IBC + offline installer.
+- [KB-8 §1](../kb/operational_events.md#1-daily-tws--ib-gateway-restart) — daily restart engine response.
+- [TASK_REGISTRY M2-IB](../../TASK_REGISTRY.md) — M2-IB.3 prerequisite this ADR resolves.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1712,3 +1773,4 @@ Three things change under the bridge:
 - **v0.8 (2026-04-27)** — M2-IG.1 batch 2 IG-specific substrate. ADR-036 (IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer; rejects `trading_ig` for asyncio mismatch with ADR-005), ADR-037 (`Instrument.tradability` field — backward-compatible spot/cfd/spread_bet discriminator; scopes ADR-027 integer-share rounding to spot only), ADR-038 (IG rate-limit defaults — parameterises ADR-031 with named-bucket config; IG defaults 30/60/40 per minute + 40 concurrent Lightstreamer subscriptions; broker-agnostic shape), ADR-039 (Phase 1 strategy under IG bridge — CAC 40 CFD as tradable instrument; ADR-021 PAUSED not SUPERSEDED; new parity envelope: directional alignment + characterised < 100 bps over 5-day run, *not* G2-IB ±1 bps). All four PROPOSED; awaiting operator review alongside ADR-034..035 to flip ACCEPTED en bloc.
 - **v0.9 (2026-04-27)** — operator approval moment. Eight ADRs flipped PROPOSED → ACCEPTED en bloc: ADR-030 (per-archetype dispatch — broker-agnostic; resolves OQ-030), ADR-033 (AccountUpdate cadence — broker-agnostic), ADR-034 (multi-broker registry; load-bearing), ADR-035 (secrets handling discipline), ADR-036 (IG driver), ADR-037 (Instrument.tradability), ADR-038 (IG rate-limit defaults), ADR-039 (Phase 1 under IG bridge). **Two ADRs stay PROPOSED**: ADR-031 (IB-specific rate-limit defaults; revisit when M2-IB resumes) and ADR-032 (IB-specific instrument resolution; revisit when M2-IB resumes). Updated OQ-030 status RESOLVED-BY-ADR-030 in OPEN_QUESTIONS.md.
 - **v0.10 (2026-04-28)** — M2-IB.2 milestone flip. ADR-031 (token-bucket rate limiter shape for IB adapters) PROPOSED → ACCEPTED: the algorithm shipped at M2-IG.2 inside `blive.adapters.shared.rate_limiter` and the IB-specific defaults table now lives at `blive.adapters.ib.rate_limiter.IB_DEFAULT_RATE_LIMITS` (`global` 20/s, `historical` 50/600s per [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults)). `IBClient.connect()` exercises the limiter via `acquire("global")` per the M2-IB.2 unit-test suite. Body of ADR-031 unchanged (append-only); status field flipped + a parenthetical PROPOSED→ACCEPTED date trail added in the ADR header. **ADR-032 stays PROPOSED** until M2-IB.3 IBInstrumentResolver exercises `qualifyContractsAsync` against IB Paper.
+- **v0.11 (2026-04-28)** — M2-IB.3 prereq closure. Added ADR-040 (Phase 1 deployment target: Windows host with native IB Gateway; no Docker / IBC for paper-mode dev; Linux VM revisited at M8 production cutover). Drafted PROPOSED, accepted same-session per the established same-day-ACCEPTED pattern; status flipped to ACCEPTED. Closes the "Decide deployment target" item from [TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md). Daily 23:45 ET TWS-restart handled by operator-managed manual relogin during the M2-IB.5 ≥5-trading-day run; blive's reconciliation handles the disconnect/reconnect transient unchanged.
