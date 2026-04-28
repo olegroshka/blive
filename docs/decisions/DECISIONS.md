@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-04-27
-version: 0.9
+last_reviewed: 2026-04-28
+version: 0.10
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -1141,8 +1141,8 @@ ADR-010 stays ACCEPTED — its spirit holds; this ADR amends only the *enumerati
 
 ## ADR-031 — Token-bucket rate limiter shape for IB adapters
 
-- **status:** PROPOSED
-- **date:** 2026-04-27
+- **status:** ACCEPTED
+- **date:** 2026-04-27 (PROPOSED) / 2026-04-28 (ACCEPTED at M2-IB.2)
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
 - **resolves:** —
@@ -1711,3 +1711,4 @@ Three things change under the bridge:
 - **v0.7 (2026-04-27)** — operator-driven pivot to IG demo bridge (M2-IG) while IB Paper account is being reopened. Added cross-cutting ADRs: ADR-034 (multi-broker registry pattern; extends ADR-004 with explicit registry, package layout, and import-linter contract for N>2 brokers), ADR-035 (secrets handling discipline: `~/.blive/secrets/{broker}.env`, env-var override, log redaction list, never-in-git rule). Both PROPOSED; M2-IG.1 batch 1. IG-specific ADRs (036..039) + KB-16/17 + DD-8 land in batch 2.
 - **v0.8 (2026-04-27)** — M2-IG.1 batch 2 IG-specific substrate. ADR-036 (IG wire-level driver: roll-our-own httpx + asyncio Lightstreamer; rejects `trading_ig` for asyncio mismatch with ADR-005), ADR-037 (`Instrument.tradability` field — backward-compatible spot/cfd/spread_bet discriminator; scopes ADR-027 integer-share rounding to spot only), ADR-038 (IG rate-limit defaults — parameterises ADR-031 with named-bucket config; IG defaults 30/60/40 per minute + 40 concurrent Lightstreamer subscriptions; broker-agnostic shape), ADR-039 (Phase 1 strategy under IG bridge — CAC 40 CFD as tradable instrument; ADR-021 PAUSED not SUPERSEDED; new parity envelope: directional alignment + characterised < 100 bps over 5-day run, *not* G2-IB ±1 bps). All four PROPOSED; awaiting operator review alongside ADR-034..035 to flip ACCEPTED en bloc.
 - **v0.9 (2026-04-27)** — operator approval moment. Eight ADRs flipped PROPOSED → ACCEPTED en bloc: ADR-030 (per-archetype dispatch — broker-agnostic; resolves OQ-030), ADR-033 (AccountUpdate cadence — broker-agnostic), ADR-034 (multi-broker registry; load-bearing), ADR-035 (secrets handling discipline), ADR-036 (IG driver), ADR-037 (Instrument.tradability), ADR-038 (IG rate-limit defaults), ADR-039 (Phase 1 under IG bridge). **Two ADRs stay PROPOSED**: ADR-031 (IB-specific rate-limit defaults; revisit when M2-IB resumes) and ADR-032 (IB-specific instrument resolution; revisit when M2-IB resumes). Updated OQ-030 status RESOLVED-BY-ADR-030 in OPEN_QUESTIONS.md.
+- **v0.10 (2026-04-28)** — M2-IB.2 milestone flip. ADR-031 (token-bucket rate limiter shape for IB adapters) PROPOSED → ACCEPTED: the algorithm shipped at M2-IG.2 inside `blive.adapters.shared.rate_limiter` and the IB-specific defaults table now lives at `blive.adapters.ib.rate_limiter.IB_DEFAULT_RATE_LIMITS` (`global` 20/s, `historical` 50/600s per [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults)). `IBClient.connect()` exercises the limiter via `acquire("global")` per the M2-IB.2 unit-test suite. Body of ADR-031 unchanged (append-only); status field flipped + a parenthetical PROPOSED→ACCEPTED date trail added in the ADR header. **ADR-032 stays PROPOSED** until M2-IB.3 IBInstrumentResolver exercises `qualifyContractsAsync` against IB Paper.
