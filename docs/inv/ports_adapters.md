@@ -3,8 +3,8 @@ id: INV-6
 title: Ports & Adapters
 status: STABLE
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.3
+last_reviewed: 2026-04-28
+version: 0.3.1
 sources:
   - REQUIREMENTS.md §7.2 (Port signatures)
   - DD-1 §1, §2 (types referenced in signatures)
@@ -145,10 +145,10 @@ land in.
 | Adapter | Module | Status | Milestone | Notes |
 |---------|--------|--------|-----------|-------|
 | `PaperBroker` | `blive.adapters.paper.broker` | STABLE (M0+M1) | M0 | in-process matcher; deterministic fills; no wire. Resolved via [`broker_registry.get_broker("paper", …)`](../../src/blive/runtime/broker_registry.py) per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004). |
-| `IBBroker` (read) | `blive.adapters.ib.broker` | MISSING — **PARKED 2026-04-27** | M2-IB | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Substrate at `M2-substrate-IB.checkpoint`; resumes when IB Paper account reopens. |
-| `IBBroker` (write) | `blive.adapters.ib.broker` | MISSING — **PARKED 2026-04-27** | M3 | `submit`, `cancel`, `replace`; full FSM via callbacks. |
-| `IGBroker` (read) | `blive.adapters.ig.broker` | MISSING | **M2-IG.3** | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Auth via 3-step REST per [ADR-036](../decisions/DECISIONS.md#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer); rate-limited via `blive.adapters.shared.rate_limiter` with [ADR-038](../decisions/DECISIONS.md#adr-038--ig-rate-limit-defaults-parameterise-adr-031) defaults. |
-| `IGBroker` (write) | `blive.adapters.ig.broker` | MISSING | **M2-IG.4** | `submit`, `cancel`, `replace`; FSM driven by Lightstreamer trade subscription. |
+| `IBBroker` (read) | `blive.adapters.ib.broker` | MISSING | M2-IB.2 / M2-IB.3 | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Substrate at `M2-substrate-IB.checkpoint`; **ACTIVE 2026-04-28** (IB Paper account commissioned 2026-04-28, enabled 2026-04-29). |
+| `IBBroker` (write) | `blive.adapters.ib.broker` | MISSING | M2-IB.4 | `submit`, `cancel`, `replace`; full FSM via `ib_async`'s `orderStatusEvent` / `execDetailsEvent` / `commissionReportEvent` callbacks. May consolidate with M3 per [RETRO-M2-IG §"Recommendations"](../retros/M2-IG_retrospective.md) — re-evaluate at M2-IB.3 close. |
+| `IGBroker` (read) | `blive.adapters.ig.broker` | DRAFT (architectural surface) | M2-IG.3 (shipped 2026-04-28; bridge-paused) | `connect`, `disconnect`, `positions`, `open_orders`, `account_snapshot`, `events`. Auth via 3-step REST per [ADR-036](../decisions/DECISIONS.md#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer); rate-limited via `blive.adapters.shared.rate_limiter` with [ADR-038](../decisions/DECISIONS.md#adr-038--ig-rate-limit-defaults-parameterise-adr-031) defaults. **Never wire-validated against IG demo** per [RETRO-M2-IG](../retros/M2-IG_retrospective.md); preserved as durable reference, no scheduled bridge revival. |
+| `IGBroker` (write) | `blive.adapters.ig.broker` | DRAFT (MARKET only; architectural surface) | M2-IG.4 (shipped 2026-04-28; bridge-paused) | `submit()` MARKET path only — `POST /positions/otc` + `GET /confirms/{ref}` polling + FSM event emission. `cancel()` / `replace()` raise `NotImplementedError` pending working-order Phase 2 needs. **Never wire-validated** per [RETRO-M2-IG](../retros/M2-IG_retrospective.md). |
 | `MockBroker` (test-only) | `tests/conftest.py` | M0 | M0 | minimal stub for unit tests not exercising round-trip |
 
 ### 2.2 `MarketDataPort` adapters
@@ -156,9 +156,9 @@ land in.
 | Adapter | Module | Status | Milestone |
 |---------|--------|--------|-----------|
 | `PaperMarketData` (deterministic-fixture) | `blive.adapters.paper.market_data` | STABLE (M1) | M1 |
-| `IBMarketData` | `blive.adapters.ib.market_data` | MISSING — **PARKED 2026-04-27** | M2-IB |
-| `IGMarketData` | `blive.adapters.ig.market_data` | MISSING | **M2-IG.3** (Lightstreamer + REST historical per [ADR-036](../decisions/DECISIONS.md#adr-036--ig-wire-level-driver-roll-our-own-httpx--asyncio-lightstreamer)) |
-| `EODHDMarketData` | `blive.adapters.eodhd.market_data` | MISSING — **PARKED 2026-04-27** | M2-IB (warm-up role; deferred with M2-IB) |
+| `IBMarketData` | `blive.adapters.ib.market_data` | MISSING | M2-IB.3 (`subscribe_bars` via `ib_async.reqMktData` / `reqHistoricalData`; no Lightstreamer abstraction — IB has its own stream model) |
+| `IGMarketData` | `blive.adapters.ig.market_data` | DRAFT (architectural surface) | M2-IG.3 (REST `historical_bars` shipped + `LightstreamerSource` Protocol abstraction; `subscribe_bars` / `subscribe_trades` raise `NotImplementedError` pending production Lightstreamer wrapper, deferred at bridge close per [RETRO-M2-IG](../retros/M2-IG_retrospective.md)) |
+| `EODHDMarketData` | `blive.adapters.eodhd.market_data` | MISSING | M2-IB (warm-up role; lands alongside `IBMarketData`) |
 
 ### 2.3 `ClockPort` adapters
 
@@ -228,3 +228,4 @@ None blocking M0; richer signatures will be needed when M2/M3 adapters land.
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. Ports lifted from REQUIREMENTS §7.2; adapter status reflects M0 plan.
 - **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `PaperMarketData` (§2.2) and `LogAlert` (§2.5) landed; `PaperBroker.replace()` (§2.1) now in-place per ADR-029-paired follow-up. M2-tier adapters remain MISSING. Port Protocol surfaces unchanged from v0.1.
 - **v0.3 (2026-04-27)** — M2-IG.2 amendment. §2.1 / §2.2 adapter trackers grew IG (read M2-IG.3 / write M2-IG.4) rows and explicit "PARKED 2026-04-27" markers on the IB / EODHD rows. §3 hexagonal-contract section now references [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) and the new `Broker registry isolation` import-linter contract. New §3.1 catalogues cross-cutting shared adapters under `blive.adapters.shared.*` (rate limiter, credentials loader). Port Protocol surfaces unchanged.
+- **v0.3.1 (2026-04-28)** — M2-IB.1 substrate-verification annotation refresh. §2.1 IBBroker (read+write) + §2.2 IBMarketData / EODHDMarketData rows: removed "— **PARKED 2026-04-27**" markers; updated milestone columns to point at M2-IB.2 / .3 / .4 sub-milestones (M2-IB now ACTIVE per [TASK_REGISTRY v0.3](../../TASK_REGISTRY.md), IB Paper account commissioned 2026-04-28). §2.1 IGBroker (read) + IGBroker (write) + §2.2 IGMarketData rows: MISSING → DRAFT (architectural surface) reflecting that M2-IG.3 / .4 actually shipped the code at architectural surface but it was never wire-validated against IG demo per [RETRO-M2-IG](../retros/M2-IG_retrospective.md); IGBroker (write) annotated MARKET-only (cancel/replace raise NotImplementedError); IGMarketData annotated REST-historical-only (subscribe_bars/_trades pending production Lightstreamer wrapper, deferred at bridge close). Status stays STABLE — annotations reflect milestone state already captured in TASK_REGISTRY v0.3 and RETRO-M2-IG. Port Protocol surfaces unchanged.
