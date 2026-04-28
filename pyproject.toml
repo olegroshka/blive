@@ -14,9 +14,13 @@ authors = [{ name = "Oleg Roshka" }]
 #  - quantdsl-backtest: research/backtesting DSL; engines reused per ADR-010.
 #    Pinned via [tool.uv.sources] to the local sibling working copy at ../btest.
 #  - ib_async: TWS-API wrapper, used only inside adapters/ib/* per ADR-002 + ADR-004.
+#    M2-IB is parked at the M2-substrate-IB.checkpoint commit; the dep stays
+#    in place for the eventual return.
+#  - httpx: async REST driver for the IG adapter (M2-IG) per ADR-036.
 dependencies = [
   "quantdsl-backtest",
   "ib_async>=2.1,<2.2",
+  "httpx>=0.27,<0.28",
   # Strategy-config validation (DD-3, ADR-028).
   "pydantic>=2.0,<3.0",
   # YAML loader for blive's per-strategy live config.
