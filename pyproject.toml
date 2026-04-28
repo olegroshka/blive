@@ -28,6 +28,7 @@ dependencies = [
   # Parquet reader for the M1 PaperMarketData fixture (ADR-029).
   "pandas>=2.0",
   "pyarrow>=15.0",
+  "lightstreamer-client-lib>=2.2.2",
 ]
 
 [project.optional-dependencies]
