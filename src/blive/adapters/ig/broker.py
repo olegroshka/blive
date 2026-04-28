@@ -32,14 +32,17 @@ from uuid import UUID, uuid4
 from blive.adapters.ig.client import IGClient
 from blive.adapters.ig.credentials import IGCredentials
 from blive.adapters.ig.instrument_resolver import IGInstrumentResolver
-from blive.domain.events import ConnectionStatus
+from blive.adapters.ig.client import IGRequestInvalid
+from blive.domain.events import ConnectionStatus, OrderEvent
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
     AccountSnapshot,
     AssetClass,
     ClientOrderId,
+    Fill,
     Instrument,
     Order,
+    OrderEventKind,
     OrderSide,
     OrderType,
     OrderUpdate,
@@ -66,13 +69,20 @@ class IGBroker:
         resolver: IGInstrumentResolver,
         credentials: IGCredentials,
         clock: ClockPort,
+        confirm_poll_interval_seconds: float = 0.1,
+        confirm_poll_max_attempts: int = 30,
     ) -> None:
         self._client = client
         self._resolver = resolver
         self._credentials = credentials
         self._clock = clock
+        self._confirm_poll_interval = confirm_poll_interval_seconds
+        self._confirm_poll_max_attempts = confirm_poll_max_attempts
         self._events: asyncio.Queue[BrokerEvent] = asyncio.Queue()
         self._connected = False
+        # Track outstanding deal references so reconciliation (M5) can
+        # correlate IG order-status events back to blive client_order_ids.
+        self._deal_ref_to_client_id: dict[str, UUID] = {}
 
     # --- BrokerPort: connect / disconnect -----------------------------------
 
@@ -232,21 +242,104 @@ class IGBroker:
         """
         return self._events_stream()
 
-    # --- BrokerPort: write methods (M2-IG.4 stubs) --------------------------
+    # --- BrokerPort: write methods (M2-IG.4) --------------------------------
 
     async def submit(self, order: Order) -> ClientOrderId:
-        raise NotImplementedError(
-            "IGBroker.submit lands at M2-IG.4; M2-IG.3 ships read-side only"
+        """Submit an order to IG via REST.
+
+        v1 supports ``OrderType.MKT`` only — sufficient for the Phase 1
+        bridge strategy ([ADR-039](../../../../docs/decisions/DECISIONS.md#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd)).
+        ``LIMIT`` / ``STOP`` (and the corresponding ``/workingorders/otc``
+        endpoint) land at M2-IG.5 / Phase 2 if a strategy needs them.
+
+        Flow per [KB-16 §4](../../../../docs/kb/ig_capability_matrix.md#4-order-types):
+
+        1. ``POST /positions/otc`` — IG returns a ``dealReference`` synchronously.
+        2. Emit ``SUBMITTED`` event (FSM ``SUBMIT_PENDING → SUBMITTED``).
+        3. Poll ``GET /confirms/{dealReference}`` until ``dealStatus`` is
+           a final value (``ACCEPTED`` or ``REJECTED``).
+        4. On ``ACCEPTED`` emit ``ACCEPTED`` then ``FILLED`` (with the
+           parsed :class:`Fill`); on ``REJECTED`` emit ``REJECTED``
+           with the IG reason string.
+
+        Returns the original ``client_order_id`` so the caller can correlate
+        across the FSM events emitted on :meth:`events`.
+        """
+        self._require_connected()
+        if order.order_type != OrderType.MKT:
+            raise NotImplementedError(
+                f"IGBroker.submit currently supports OrderType.MKT only; "
+                f"got {order.order_type.value}. LIMIT/STOP via /workingorders/otc "
+                f"lands at M2-IG.5 / Phase 2 if a strategy needs it."
+            )
+
+        epic = await self._resolver.resolve(order.instrument)
+        body = {
+            "direction": order.side.value,
+            "epic": epic,
+            "expiry": "-",
+            "size": str(order.quantity),
+            "currencyCode": order.instrument.currency,
+            "orderType": "MARKET",
+            "guaranteedStop": False,
+            "forceOpen": True,
+        }
+
+        # Step 1: POST the order. IG returns dealReference; HTTP errors map
+        # to the IGClient's typed-exception hierarchy (IGOrderRejected for
+        # error.confirms.deal-rejected).
+        response = await self._client.post(
+            "/positions/otc", version=2, json=body, bucket="trading"
         )
+        if not isinstance(response, dict):
+            raise _IGShapeError(
+                f"IG /positions/otc returned non-dict body: {type(response).__name__}"
+            )
+        deal_reference = response.get("dealReference")
+        if not isinstance(deal_reference, str) or not deal_reference:
+            raise _IGShapeError(
+                f"IG /positions/otc response missing dealReference: {response!r}"
+            )
+
+        # Track for later cancel/reconciliation. The deal_reference -> blive
+        # client_order_id mapping is what reconciliation (M5) uses to
+        # correlate incoming order-status events with the orders we placed.
+        self._deal_ref_to_client_id[deal_reference] = order.client_order_id
+
+        # Step 2: emit SUBMITTED event.
+        now = self._clock.now()
+        await self._events.put(
+            OrderEvent(
+                client_order_id=order.client_order_id,
+                venue_order_id=deal_reference,  # provisional; updated to dealId on confirm
+                kind=OrderEventKind.SUBMITTED,
+                reason=None,
+                time_utc=now,
+            )
+        )
+
+        # Step 3: poll /confirms until the deal resolves.
+        confirm = await self._poll_confirm(deal_reference)
+
+        # Step 4: emit terminal events from the confirm payload.
+        await self._emit_terminal_events_from_confirm(
+            order=order,
+            deal_reference=deal_reference,
+            confirm=confirm,
+        )
+        return ClientOrderId(order.client_order_id)
 
     async def cancel(self, client_order_id: ClientOrderId) -> None:
         raise NotImplementedError(
-            "IGBroker.cancel lands at M2-IG.4; M2-IG.3 ships read-side only"
+            "IGBroker.cancel applies to working orders (LIMIT / STOP); the "
+            "Phase 1 bridge strategy uses MARKET orders only ([ADR-039]). "
+            "Cancellation lands when the first working-order strategy needs it."
         )
 
     async def replace(self, client_order_id: ClientOrderId, new: OrderUpdate) -> None:
         raise NotImplementedError(
-            "IGBroker.replace lands at M2-IG.4; M2-IG.3 ships read-side only"
+            "IGBroker.replace applies to working orders; not in M2-IG scope. "
+            "See cancel() for context."
         )
 
     # --- Internals ----------------------------------------------------------
@@ -265,6 +358,106 @@ class IGBroker:
             event = await self._events.get()
             yield event
 
+    # --- Submit-flow internals ----------------------------------------------
+
+    async def _poll_confirm(self, deal_reference: str) -> Mapping[str, Any]:
+        """Poll ``GET /confirms/{dealReference}`` until the deal status is final.
+
+        IG's market-order confirms typically resolve within 100–300 ms. We
+        poll every ``confirm_poll_interval`` seconds (default 0.1) up to
+        ``confirm_poll_max_attempts`` times (default 30 → 3 s total). If
+        the deal hasn't resolved by then, raises :class:`_IGConfirmTimeout`
+        carrying the most recent payload — caller decides whether that
+        means a hard failure or a deferred resolution.
+
+        A ``dealStatus`` of ``"ACCEPTED"`` / ``"REJECTED"`` is final;
+        ``"OPEN"`` (or absent) means the deal is still in flight.
+        """
+        for attempt in range(self._confirm_poll_max_attempts):
+            try:
+                payload = await self._client.get(
+                    f"/confirms/{deal_reference}", version=1, bucket="general"
+                )
+            except IGRequestInvalid:
+                # IG sometimes 404s briefly while the deal is being processed;
+                # treat as "not yet resolved" and retry.
+                payload = None
+
+            if isinstance(payload, dict):
+                status = payload.get("dealStatus")
+                if status in ("ACCEPTED", "REJECTED"):
+                    return payload
+
+            if attempt < self._confirm_poll_max_attempts - 1:
+                await self._clock.sleep(self._confirm_poll_interval)
+
+        raise _IGConfirmTimeout(
+            f"IG /confirms/{deal_reference} did not resolve within "
+            f"{self._confirm_poll_max_attempts * self._confirm_poll_interval:.1f}s; "
+            f"last payload: {payload!r}"
+        )
+
+    async def _emit_terminal_events_from_confirm(
+        self,
+        *,
+        order: Order,
+        deal_reference: str,
+        confirm: Mapping[str, Any],
+    ) -> None:
+        """Translate the /confirms response into ACCEPTED+FILLED or REJECTED events."""
+        deal_status = confirm.get("dealStatus")
+        deal_id = str(confirm.get("dealId", "")) or deal_reference
+        now = self._clock.now()
+
+        if deal_status == "REJECTED":
+            reason = str(
+                confirm.get("reason")
+                or confirm.get("reasonCode")
+                or "REJECTED_NO_REASON"
+            )
+            await self._events.put(
+                OrderEvent(
+                    client_order_id=order.client_order_id,
+                    venue_order_id=deal_id,
+                    kind=OrderEventKind.REJECTED,
+                    reason=reason,
+                    time_utc=now,
+                )
+            )
+            return
+
+        # ACCEPTED — emit ACCEPTED then FILLED (market orders fill on accept).
+        await self._events.put(
+            OrderEvent(
+                client_order_id=order.client_order_id,
+                venue_order_id=deal_id,
+                kind=OrderEventKind.ACCEPTED,
+                reason=None,
+                time_utc=now,
+            )
+        )
+        try:
+            fill = _parse_fill_from_confirm(
+                order=order, deal_id=deal_id, confirm=confirm, time_utc=now
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            log.warning(
+                "IG confirm for deal %s parsed as ACCEPTED but fill construction failed: %s",
+                deal_id,
+                exc,
+            )
+            return
+        await self._events.put(
+            OrderEvent(
+                client_order_id=order.client_order_id,
+                venue_order_id=deal_id,
+                kind=OrderEventKind.FILLED,
+                reason=None,
+                time_utc=now,
+                fill=fill,
+            )
+        )
+
 
 # --- IG response parsers (module-level, unit-testable) ----------------------
 
@@ -272,6 +465,58 @@ class IGBroker:
 class _IGShapeError(ValueError):
     """The IG response had a shape the parser doesn't recognise. Bubbles up
     as a regular ValueError but with a distinct class for tests / logs."""
+
+
+class _IGConfirmTimeout(RuntimeError):
+    """The /confirms poll exhausted attempts without seeing a final status.
+
+    Bubbles up as a runtime error; caller (typically the engine's submit
+    handler) decides whether to treat as a hard failure or as a deferred
+    resolution to be reconciled later. M5 reconciliation will pick up
+    deferred resolutions via `_deal_ref_to_client_id`.
+    """
+
+
+def _parse_fill_from_confirm(
+    *,
+    order: Order,
+    deal_id: str,
+    confirm: Mapping[str, Any],
+    time_utc: datetime,
+) -> Fill:
+    """Build a :class:`Fill` from an IG /confirms ACCEPTED response.
+
+    IG returns ``size`` (filled quantity) and ``level`` (fill price) plus
+    ``dealId``; we copy the order's instrument + side and tag with the
+    deal id as ``venue_exec_id`` (IG's per-deal identifier; unique per
+    submission).
+    """
+    size_raw = confirm.get("size")
+    if size_raw is None:
+        raise ValueError("IG /confirms missing 'size' for FILLED event")
+    quantity = Decimal(str(size_raw))
+    if quantity <= 0:
+        raise ValueError(f"IG /confirms 'size' must be > 0; got {size_raw!r}")
+
+    level_raw = confirm.get("level")
+    if level_raw is None:
+        raise ValueError("IG /confirms missing 'level' for FILLED event")
+    price = Decimal(str(level_raw))
+    if price <= 0:
+        raise ValueError(f"IG /confirms 'level' must be > 0; got {level_raw!r}")
+
+    return Fill(
+        client_order_id=order.client_order_id,
+        venue_order_id=deal_id,
+        venue_exec_id=deal_id,  # IG's dealId is unique per execution; reuse for dedup
+        instrument=order.instrument,
+        side=order.side,
+        quantity=quantity,
+        price=price,
+        commission=Decimal("0"),  # IG bundles commissions into the spread for CFDs
+        currency=order.instrument.currency,
+        time_utc=time_utc,
+    )
 
 
 def _parse_position(

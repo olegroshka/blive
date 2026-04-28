@@ -38,6 +38,9 @@ from blive.adapters.shared.rate_limiter import (
 from blive.domain.events import ConnectionStatus
 from blive.domain.types import (
     AssetClass,
+    Instrument,
+    Order,
+    OrderEventKind,
     OrderSide,
     OrderType,
     OrderUpdate,
@@ -466,30 +469,245 @@ async def test_events_yields_connection_status_on_connect() -> None:
     assert "ACC123" in first.detail
 
 
-# --- Write-method stubs (M2-IG.4) ------------------------------------------
+# --- Write-method tests (M2-IG.4) ------------------------------------------
 
 
-async def test_submit_raises_not_implemented() -> None:
+def _make_market_order(
+    *,
+    side: OrderSide = OrderSide.BUY,
+    quantity: Decimal = Decimal("0.5"),
+) -> Order:
+    return Order(
+        client_order_id=uuid4(),
+        strategy_id="tkan_v4_momentum_timing_1x_ig",
+        instrument=Instrument(
+            symbol="CAC40",
+            venue="XPAR",
+            currency="EUR",
+            asset_class=AssetClass.INDEX,
+            tradability="cfd",
+        ),
+        side=side,
+        quantity=quantity,
+        order_type=OrderType.MKT,
+        time_in_force=TimeInForce.DAY,
+        limit_price=None,
+        stop_price=None,
+        parent_id=None,
+        tags={},
+        created_at=datetime(2026, 4, 28, 9, 0, 0, tzinfo=timezone.utc),
+    )
+
+
+async def test_submit_market_order_happy_path() -> None:
+    """Successful submit: POST /positions/otc → confirm ACCEPTED → SUBMITTED + ACCEPTED + FILLED events."""
+    requests_seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        requests_seen.append((request.method, path))
+        if request.method == "POST" and path.endswith("/session"):
+            return _login_response()
+        if request.method == "PUT" and path.endswith("/session"):
+            return httpx.Response(status_code=200, json={})
+        if path.endswith("/markets/IX.D.CAC40.CASH.IP"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "instrument": {
+                        "epic": "IX.D.CAC40.CASH.IP",
+                        "name": "France 40",
+                        "currencies": [{"code": "EUR"}],
+                        "lotSize": 1.0,
+                    },
+                    "dealingRules": {"minDealSize": {"value": 0.1, "unit": "POINTS"}},
+                    "snapshot": {},
+                },
+            )
+        if request.method == "POST" and path.endswith("/positions/otc"):
+            body = request.read()
+            assert b'"BUY"' in body and b'"MARKET"' in body
+            return httpx.Response(status_code=200, json={"dealReference": "DEALREF1"})
+        if request.method == "GET" and path.endswith("/confirms/DEALREF1"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "dealReference": "DEALREF1",
+                    "dealId": "DIDABC123",
+                    "dealStatus": "ACCEPTED",
+                    "level": 7050.5,
+                    "size": 0.5,
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {path}")
+
+    broker, _client, _clock = _make_broker(handler)
+    await broker.connect()
+
+    order = _make_market_order()
+    returned_id = await broker.submit(order)
+    assert returned_id == order.client_order_id
+
+    # Drain events: ConnectionStatus(connected) + SUBMITTED + ACCEPTED + FILLED.
+    iterator = broker.events()
+    seen: list[Any] = []
+    for _ in range(4):
+        seen.append(await asyncio.wait_for(iterator.__anext__(), timeout=1.0))
+
+    assert isinstance(seen[0], ConnectionStatus) and seen[0].connected is True
+    assert seen[1].kind == OrderEventKind.SUBMITTED
+    assert seen[1].venue_order_id == "DEALREF1"
+    assert seen[2].kind == OrderEventKind.ACCEPTED
+    assert seen[2].venue_order_id == "DIDABC123"
+    assert seen[3].kind == OrderEventKind.FILLED
+    assert seen[3].fill is not None
+    assert seen[3].fill.price == Decimal("7050.5")
+    assert seen[3].fill.quantity == Decimal("0.5")
+    assert seen[3].fill.venue_exec_id == "DIDABC123"
+
+
+async def test_submit_market_order_rejected() -> None:
+    """Confirm REJECTED → SUBMITTED + REJECTED events; no FILLED."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/session"):
+            return _login_response()
+        if request.method == "PUT" and path.endswith("/session"):
+            return httpx.Response(status_code=200, json={})
+        if path.endswith("/markets/IX.D.CAC40.CASH.IP"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "instrument": {
+                        "epic": "IX.D.CAC40.CASH.IP",
+                        "name": "France 40",
+                        "currencies": [{"code": "EUR"}],
+                        "lotSize": 1.0,
+                    },
+                    "dealingRules": {"minDealSize": {"value": 0.1, "unit": "POINTS"}},
+                },
+            )
+        if request.method == "POST" and path.endswith("/positions/otc"):
+            return httpx.Response(status_code=200, json={"dealReference": "DEALREF2"})
+        if request.method == "GET" and path.endswith("/confirms/DEALREF2"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "dealReference": "DEALREF2",
+                    "dealId": "DIDXYZ",
+                    "dealStatus": "REJECTED",
+                    "reason": "INSUFFICIENT_FUNDS",
+                    "reasonCode": "INSUFFICIENT_FUNDS",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {path}")
+
+    broker, _client, _clock = _make_broker(handler)
+    await broker.connect()
+    order = _make_market_order()
+    await broker.submit(order)
+
+    # Drain: connect + SUBMITTED + REJECTED.
+    iterator = broker.events()
+    seen: list[Any] = []
+    for _ in range(3):
+        seen.append(await asyncio.wait_for(iterator.__anext__(), timeout=1.0))
+
+    assert seen[1].kind == OrderEventKind.SUBMITTED
+    assert seen[2].kind == OrderEventKind.REJECTED
+    assert "INSUFFICIENT_FUNDS" in (seen[2].reason or "")
+
+
+async def test_submit_polls_until_confirm_resolves() -> None:
+    """Confirm endpoint returns OPEN until 3rd attempt; submit waits."""
+    confirm_calls = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/session"):
+            return _login_response()
+        if request.method == "PUT" and path.endswith("/session"):
+            return httpx.Response(status_code=200, json={})
+        if path.endswith("/markets/IX.D.CAC40.CASH.IP"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "instrument": {
+                        "epic": "IX.D.CAC40.CASH.IP",
+                        "name": "France 40",
+                        "currencies": [{"code": "EUR"}],
+                        "lotSize": 1.0,
+                    },
+                    "dealingRules": {"minDealSize": {"value": 0.1}},
+                },
+            )
+        if request.method == "POST" and path.endswith("/positions/otc"):
+            return httpx.Response(status_code=200, json={"dealReference": "DEALREF3"})
+        if request.method == "GET" and path.endswith("/confirms/DEALREF3"):
+            confirm_calls[0] += 1
+            if confirm_calls[0] < 3:
+                return httpx.Response(status_code=200, json={"dealStatus": "OPEN"})
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "dealReference": "DEALREF3",
+                    "dealId": "DID3",
+                    "dealStatus": "ACCEPTED",
+                    "level": 7000,
+                    "size": 1.0,
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {path}")
+
+    broker, _client, _clock = _make_broker(handler)
+    await broker.connect()
+    await broker.submit(_make_market_order(quantity=Decimal("1.0")))
+    assert confirm_calls[0] == 3, "should have polled 3 times before resolving"
+
+
+async def test_submit_non_market_order_raises_not_implemented() -> None:
     broker, _client, _clock = _make_broker(lambda _: _login_response())
-    fake_order = type(
-        "_O",
-        (),
-        {"client_order_id": uuid4(), "strategy_id": "s", "instrument": None,
-         "side": OrderSide.BUY, "quantity": Decimal("1"), "order_type": OrderType.MKT},
-    )()
-    with pytest.raises(NotImplementedError, match="M2-IG.4"):
-        await broker.submit(fake_order)  # type: ignore[arg-type]
+    await broker.connect()  # not actually called by handler; using simple lambda
+    limit_order = Order(
+        client_order_id=uuid4(),
+        strategy_id="s",
+        instrument=Instrument(
+            symbol="CAC40",
+            venue="XPAR",
+            currency="EUR",
+            asset_class=AssetClass.INDEX,
+            tradability="cfd",
+        ),
+        side=OrderSide.BUY,
+        quantity=Decimal("1"),
+        order_type=OrderType.LMT,
+        time_in_force=TimeInForce.DAY,
+        limit_price=Decimal("7000"),
+        stop_price=None,
+        parent_id=None,
+        tags={},
+        created_at=datetime(2026, 4, 28, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    with pytest.raises(NotImplementedError, match="OrderType.MKT only"):
+        await broker.submit(limit_order)
+
+
+async def test_submit_before_connect_raises() -> None:
+    broker, _client, _clock = _make_broker(lambda _: _login_response())
+    with pytest.raises(RuntimeError, match="before connect"):
+        await broker.submit(_make_market_order())
 
 
 async def test_cancel_raises_not_implemented() -> None:
     broker, _client, _clock = _make_broker(lambda _: _login_response())
-    with pytest.raises(NotImplementedError, match="M2-IG.4"):
+    with pytest.raises(NotImplementedError, match="working orders"):
         await broker.cancel(uuid4())  # type: ignore[arg-type]
 
 
 async def test_replace_raises_not_implemented() -> None:
     broker, _client, _clock = _make_broker(lambda _: _login_response())
-    with pytest.raises(NotImplementedError, match="M2-IG.4"):
+    with pytest.raises(NotImplementedError, match="working orders"):
         await broker.replace(uuid4(), OrderUpdate(quantity=Decimal("1")))  # type: ignore[arg-type]
 
 
