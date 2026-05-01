@@ -1,17 +1,25 @@
 """IB broker adapter — :class:`BrokerPort` implementation, read side.
 
 M2-IB.3b-i ships the **read side**: ``connect`` / ``disconnect`` /
-``positions`` / ``account_snapshot`` / ``open_orders`` / ``events``.
+``positions`` / ``account_snapshot`` / ``open_orders`` / ``events``,
+plus the 30s diff-suppress :class:`AccountUpdate` emission timer per
+[ADR-033](../../../../docs/decisions/DECISIONS.md#adr-033--accountupdate-event-shape-and-sampling-cadence).
 The write side (``submit`` / ``cancel`` / ``replace``) lands at M2-IB.4
 and currently raises :class:`NotImplementedError`.
 
 Connection model (per [KB-2 §1](../../../../docs/kb/ib_capability_matrix.md#1-connectivity-surface)):
 the underlying :class:`IBClient` does the TCP handshake at :meth:`connect`,
-then this class subscribes to ``ib.accountValuesEvent`` so account values
+then this class subscribes to ``ib.accountValueEvent`` so account values
 stream in via ``ib_async``'s eventkit and accumulate locally for
 :meth:`account_snapshot` to compose. Positions and open orders are
 queried on demand via ``reqPositionsAsync`` / ``reqAllOpenOrdersAsync``;
 each consumes one ``global`` token from the rate limiter per [KB-3 §1](../../../../docs/kb/ib_pacing_spec.md#1-the-50-msgsec-client-throttle).
+
+A background task started in :meth:`connect` (cancelled in :meth:`disconnect`)
+ticks every ``account_update_interval_seconds`` (default 30s) and emits
+an :class:`AccountUpdate` onto the :meth:`events` iterator if any field
+crossed its diff-suppress threshold (currency-unit 0.01 / leverage 0.001
+per ADR-033 §"Decision" item 2).
 
 Position-mapping note: IB's view is per-account, not per-strategy. blive's
 :class:`Position` requires a ``strategy_id``; this adapter tags positions
@@ -24,17 +32,13 @@ What this module owns:
 
 - TCP-handshake plumbing via :class:`IBClient`.
 - Account-values accumulation (the cache underpinning :meth:`account_snapshot`).
+- AccountUpdate emission timer + diff-suppress logic (ADR-033).
 - IB ``Position`` / ``Trade`` parsing into broker-neutral
   :class:`blive.domain.types.Position` / :class:`Order` records.
-- ConnectionStatus emission on connect/disconnect (the events()
-  iterator's M2-IB.3b-i payload).
+- ConnectionStatus emission on connect/disconnect.
 
 What is **not** here yet:
 
-- 30s diff-suppress AccountUpdate emission timer — M2-IB.3b-i follow-up
-  per [ADR-033](../../../../docs/decisions/DECISIONS.md#adr-033--accountupdate-event-shape-and-sampling-cadence)
-  Decision item 2. The event type :class:`AccountUpdate` is already
-  defined in :mod:`blive.domain.events` for the timer to emit.
 - Order-event FSM emission via ``orderStatusEvent`` /
   ``execDetailsEvent`` / ``commissionReportEvent`` — M2-IB.4 (write
   side).
@@ -55,7 +59,7 @@ import ib_async
 
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
-from blive.domain.events import ConnectionStatus
+from blive.domain.events import AccountUpdate, ConnectionStatus
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
     AccountSnapshot,
@@ -122,6 +126,15 @@ _TAG_GROSS_POSITION = "GrossPositionValue"
 _TAG_MAINT_MARGIN = "MaintMarginReq"
 
 
+# Per-field thresholds for the AccountUpdate diff-suppress timer per
+# [ADR-033](../../../../docs/decisions/DECISIONS.md#adr-033--accountupdate-event-shape-and-sampling-cadence)
+# §"Decision" item 2. Currency-unit fields (equity, cash_by_ccy[ccy],
+# buying_power, gross_exposure, net_exposure, margin_used) use 0.01;
+# the dimensionless ``leverage`` ratio uses 0.001 (3 d.p.).
+_ACCOUNT_VALUE_THRESHOLD: Decimal = Decimal("0.01")
+_LEVERAGE_THRESHOLD: Decimal = Decimal("0.001")
+
+
 class IBShapeError(Exception):
     """Raised when an IB-side response (positions, account values, orders)
     cannot be parsed into a broker-neutral domain object — typically a
@@ -147,10 +160,12 @@ class IBBroker:
         client: IBClient,
         resolver: IBInstrumentResolver,
         clock: ClockPort,
+        account_update_interval_seconds: float = 30.0,
     ) -> None:
         self._client = client
         self._resolver = resolver
         self._clock = clock
+        self._account_update_interval_seconds = account_update_interval_seconds
         self._connected = False
         self._events: asyncio.Queue[BrokerEvent] = asyncio.Queue()
         # Latest accumulated AccountValue tuples, keyed by (currency, tag).
@@ -159,6 +174,12 @@ class IBBroker:
         # Cached event handler reference — needed so disconnect can detach
         # via ``-=`` symmetrically with the ``+=`` registration in connect.
         self._account_value_handler = self._on_account_value
+        # Last-emitted snapshot for the 30s diff-suppress timer per ADR-033.
+        # None until the first tick; reset on disconnect.
+        self._last_emitted_snapshot: AccountSnapshot | None = None
+        # Background task running :meth:`_account_update_loop`. Cancelled on
+        # disconnect; recreated on connect.
+        self._account_update_task: asyncio.Task[None] | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -198,6 +219,12 @@ class IBBroker:
         # Subscribe for future updates.
         ib.accountValueEvent += self._account_value_handler
         self._connected = True
+        # Start the 30s diff-suppress AccountUpdate emission timer per
+        # ADR-033 §"Decision" item 2.
+        self._account_update_task = asyncio.create_task(
+            self._account_update_loop(),
+            name=f"ib-broker-account-update-{self._client.credentials.account_id}",
+        )
         await self._events.put(
             ConnectionStatus(
                 connected=True,
@@ -224,6 +251,18 @@ class IBBroker:
         """
         if not self._connected:
             return
+        # Cancel the AccountUpdate emission timer first so it doesn't
+        # interleave with cache teardown.
+        task = self._account_update_task
+        self._account_update_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                log.warning("AccountUpdate loop raised on cancel; suppressing: %s", exc)
         ib = self._client.ib
         try:
             ib.accountValueEvent -= self._account_value_handler
@@ -235,6 +274,7 @@ class IBBroker:
         await self._client.disconnect()
         self._connected = False
         self._account_values.clear()
+        self._last_emitted_snapshot = None
         await self._events.put(
             ConnectionStatus(
                 connected=False,
@@ -321,9 +361,9 @@ class IBBroker:
         update events.
 
         For M2-IB.3b-i the iterator yields :class:`ConnectionStatus`
-        records emitted from :meth:`connect` / :meth:`disconnect`.
-        :class:`AccountUpdate` events arrive once the diff-suppress timer
-        lands; :class:`OrderEvent` events arrive at M2-IB.4 (write side).
+        records (connect / disconnect) plus :class:`AccountUpdate` records
+        emitted by the 30s diff-suppress timer per [ADR-033](../../../../docs/decisions/DECISIONS.md#adr-033--accountupdate-event-shape-and-sampling-cadence).
+        :class:`OrderEvent` events arrive at M2-IB.4 (write side).
         """
         return self._events_stream()
 
@@ -346,6 +386,85 @@ class IBBroker:
 
     async def replace(self, client_order_id: ClientOrderId, new: OrderUpdate) -> None:
         raise NotImplementedError("IBBroker.replace lands at M2-IB.4 (write side).")
+
+    # --- Internals: AccountUpdate emission timer (ADR-033) ------------------
+
+    async def _account_update_loop(self) -> None:
+        """Background task: every ``account_update_interval_seconds`` (30s
+        wall-clock by default), invoke :meth:`_account_update_tick`.
+
+        Cancelled by :meth:`disconnect`. Uses :func:`asyncio.sleep` rather
+        than :meth:`ClockPort.sleep` so the cadence is real-time even
+        when tests inject a :class:`SimClock` for timestamps. Tests of
+        the tick logic call :meth:`_account_update_tick` directly rather
+        than running this loop.
+        """
+        try:
+            while self._connected:
+                await asyncio.sleep(self._account_update_interval_seconds)
+                if not self._connected:
+                    return
+                await self._account_update_tick()
+        except asyncio.CancelledError:
+            raise
+
+    async def _account_update_tick(self) -> None:
+        """One iteration of the AccountUpdate emission loop.
+
+        Builds the current snapshot from the accumulated account-values
+        cache; if any field has changed beyond its threshold (or this is
+        the first tick after connect), emits an
+        :class:`AccountUpdate` event and updates :attr:`_last_emitted_snapshot`.
+        Empty cache or build failure → silent skip (no event, no error
+        propagation; the next tick re-evaluates).
+        """
+        if not self._account_values:
+            return
+        try:
+            current = self._build_account_snapshot(taken_at=self._clock.now())
+        except IBShapeError:
+            return
+        if not self._should_emit_account_update(current):
+            return
+        await self._events.put(AccountUpdate(snapshot=current, time_utc=self._clock.now()))
+        self._last_emitted_snapshot = current
+
+    def _should_emit_account_update(self, current: AccountSnapshot) -> bool:
+        """Per ADR-033 §"Decision" item 2: emit when any field has moved
+        beyond its threshold compared to the last emitted snapshot.
+
+        Per-field thresholds (currency-unit values use 0.01; ``leverage``
+        uses 0.001 since it is a ratio). On the first tick (no
+        ``_last_emitted_snapshot``), always emit — there is no baseline
+        to diff against and the consumer (UI / persistence) needs the
+        initial state.
+        """
+        last = self._last_emitted_snapshot
+        if last is None:
+            return True
+
+        if abs(current.equity - last.equity) >= _ACCOUNT_VALUE_THRESHOLD:
+            return True
+        if abs(current.buying_power - last.buying_power) >= _ACCOUNT_VALUE_THRESHOLD:
+            return True
+        if abs(current.gross_exposure - last.gross_exposure) >= _ACCOUNT_VALUE_THRESHOLD:
+            return True
+        if abs(current.net_exposure - last.net_exposure) >= _ACCOUNT_VALUE_THRESHOLD:
+            return True
+        if abs(current.margin_used - last.margin_used) >= _ACCOUNT_VALUE_THRESHOLD:
+            return True
+        if abs(current.leverage - last.leverage) >= _LEVERAGE_THRESHOLD:
+            return True
+
+        # cash_by_ccy: union of currencies; treat absent currency as zero.
+        all_ccys = set(current.cash_by_ccy) | set(last.cash_by_ccy)
+        for ccy in all_ccys:
+            delta = abs(
+                current.cash_by_ccy.get(ccy, Decimal("0")) - last.cash_by_ccy.get(ccy, Decimal("0"))
+            )
+            if delta >= _ACCOUNT_VALUE_THRESHOLD:
+                return True
+        return False
 
     # --- Internals: event handlers ------------------------------------------
 

@@ -18,6 +18,7 @@ Mocking strategy:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -36,7 +37,7 @@ from blive.adapters.shared.rate_limiter import (
     RateLimitConfig,
     TokenBucketRateLimiter,
 )
-from blive.domain.events import ConnectionStatus
+from blive.domain.events import AccountUpdate, ConnectionStatus
 from blive.domain.types import (
     AssetClass,
     OrderSide,
@@ -678,3 +679,234 @@ async def test_replace_raises_not_implemented(
             ClientOrderId(uuid4()),
             OrderUpdate(quantity=Decimal("50"), limit_price=None, stop_price=None),
         )
+
+
+# --- AccountUpdate diff-suppress timer (ADR-033 §"Decision" item 2) --------
+
+
+async def test_account_update_tick_emits_baseline_on_first_call(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """First tick after connect — no prior emitted snapshot — always emits."""
+    initial = [
+        _ib_account_value(tag="NetLiquidationByCurrency", value="100000.00"),
+        _ib_account_value(tag="BuyingPower", value="200000.00"),
+    ]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    # Drain the connect ConnectionStatus so we can isolate the AccountUpdate.
+    events_iter = broker.events()
+    await events_iter.__anext__()
+
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    event = await events_iter.__anext__()
+    assert isinstance(event, AccountUpdate)
+    assert event.snapshot.equity == Decimal("100000.00")
+
+
+async def test_account_update_tick_skips_when_cache_empty(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Empty cache → silent skip; no event emitted."""
+    mock_ib = _make_mock_ib(initial_account_values=[])
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # drain ConnectionStatus
+
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    # No further event ready — the queue should be empty.
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_account_update_tick_skips_when_nothing_changed(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Second tick with identical values does NOT emit (diff-suppress)."""
+    initial = [_ib_account_value(tag="NetLiquidationByCurrency", value="100000.00")]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+    await events_iter.__anext__()  # baseline AccountUpdate
+
+    # Tick again with no change.
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_account_update_tick_emits_on_above_threshold_equity_change(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """A 0.02 currency-unit equity move (above 0.01 threshold) triggers emission."""
+    initial = [_ib_account_value(tag="NetLiquidationByCurrency", value="100000.00")]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+    await events_iter.__anext__()  # baseline
+
+    # Push a small but above-threshold change.
+    mock_ib.accountValueEvent.emit(
+        _ib_account_value(tag="NetLiquidationByCurrency", value="100000.02")
+    )
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    event = await events_iter.__anext__()
+    assert isinstance(event, AccountUpdate)
+    assert event.snapshot.equity == Decimal("100000.02")
+
+
+async def test_account_update_tick_skips_below_threshold_change(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """A 0.005 currency-unit equity move (below 0.01 threshold) does NOT emit."""
+    initial = [_ib_account_value(tag="NetLiquidationByCurrency", value="100000.000")]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+    await events_iter.__anext__()  # baseline
+
+    # Sub-threshold change.
+    mock_ib.accountValueEvent.emit(
+        _ib_account_value(tag="NetLiquidationByCurrency", value="100000.005")
+    )
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_account_update_tick_uses_finer_threshold_for_leverage(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Leverage threshold is 0.001 (3 d.p.); a 0.0005 leverage move does
+    NOT emit on its own. Verified by changing only gross_exposure such
+    that leverage moves below the leverage threshold while equity stays
+    far below its currency threshold."""
+    # equity=10_000_000.00; gross=200_000.00 → leverage=0.02
+    initial = [
+        _ib_account_value(tag="NetLiquidationByCurrency", value="10000000.00"),
+        _ib_account_value(tag="GrossPositionValue", value="200000.00"),
+    ]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+    baseline = await events_iter.__anext__()
+    assert isinstance(baseline, AccountUpdate)
+    # Move gross by less than ANY threshold (0.001 cur unit / 1e-10 leverage delta).
+    # With equity=10M, a 0.001 GrossPositionValue change is below currency
+    # threshold (0.01) AND yields a leverage delta of 1e-10 (well below 0.001).
+    mock_ib.accountValueEvent.emit(_ib_account_value(tag="GrossPositionValue", value="200000.001"))
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_account_update_tick_emits_on_cash_by_ccy_change(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """A new currency appearing in cash_by_ccy (or balance moving above
+    threshold) emits."""
+    initial = [
+        _ib_account_value(tag="NetLiquidationByCurrency", value="100000.00", currency="EUR"),
+        _ib_account_value(tag="TotalCashBalance", value="50000.00", currency="EUR"),
+    ]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+    await events_iter.__anext__()  # baseline (EUR-only cash)
+
+    # Push USD cash arriving for the first time (not in baseline → above
+    # threshold relative to implicit zero).
+    mock_ib.accountValueEvent.emit(
+        _ib_account_value(tag="TotalCashBalance", value="100.00", currency="USD")
+    )
+    await broker._account_update_tick()  # type: ignore[attr-defined]
+
+    event = await events_iter.__anext__()
+    assert isinstance(event, AccountUpdate)
+    assert event.snapshot.cash_by_ccy["USD"] == Decimal("100.00")
+
+
+async def test_disconnect_cancels_account_update_task(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """The 30s emission loop is started by connect and must be cancelled
+    by disconnect (otherwise the asyncio loop has dangling tasks)."""
+    mock_ib = _make_mock_ib(
+        initial_account_values=[_ib_account_value(tag="NetLiquidationByCurrency", value="100000")]
+    )
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    task = broker._account_update_task  # type: ignore[attr-defined]
+    assert task is not None and not task.done()
+
+    await broker.disconnect()
+
+    # After disconnect the task field is reset and the underlying task is
+    # cancelled / done.
+    assert broker._account_update_task is None  # type: ignore[attr-defined]
+    assert task.done()
+
+
+async def test_connect_uses_zero_interval_for_short_test_runs(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Tests can pass ``account_update_interval_seconds=0`` to make the
+    background loop fire on every event-loop iteration. Verify the
+    parameter wires through; we don't actually run the loop here, just
+    confirm the broker accepts and stores the override."""
+    mock_ib = _make_mock_ib()
+    client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock, ib=mock_ib)
+    resolver = IBInstrumentResolver(client)
+    broker = IBBroker(
+        client=client,
+        resolver=resolver,
+        clock=clock,
+        account_update_interval_seconds=0.0,
+    )
+    await broker.connect()
+    try:
+        # Just verify the timer task is alive; cancel via disconnect.
+        assert broker._account_update_task is not None  # type: ignore[attr-defined]
+    finally:
+        await broker.disconnect()

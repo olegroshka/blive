@@ -18,7 +18,12 @@ from typing import (
     runtime_checkable,
 )
 
-from blive.domain.events import ConnectionStatus, DomainEvent, OrderEvent
+from blive.domain.events import (
+    AccountUpdate,
+    ConnectionStatus,
+    DomainEvent,
+    OrderEvent,
+)
 from blive.domain.types import (
     AccountSnapshot,
     Bar,
@@ -40,8 +45,10 @@ SubscriptionId = NewType("SubscriptionId", int)
 
 # --- BrokerEvent union -------------------------------------------------------
 
-# What ``BrokerPort.events()`` yields. Widens at M2 with AccountUpdate.
-BrokerEvent = OrderEvent | ConnectionStatus
+# What ``BrokerPort.events()`` yields. Widened at M2-IB.3b-i with
+# AccountUpdate per ADR-033 (the IB adapter's 30s diff-suppress timer
+# emits these onto the events queue alongside connection events).
+BrokerEvent = OrderEvent | ConnectionStatus | AccountUpdate
 
 
 # --- Ports (INV-6 §1) --------------------------------------------------------

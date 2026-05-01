@@ -4,7 +4,7 @@ title: Domain Events
 status: STABLE
 owner: Claude
 last_reviewed: 2026-05-01
-version: 0.3
+version: 0.3.1
 sources:
   - REQUIREMENTS.md §5.3 (order events)
   - REQUIREMENTS.md §5.5 (risk events, kill-switch)
@@ -141,3 +141,4 @@ milestones land.
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. M0 events (order events, connection) live; later events catalogued for forward-planning.
 - **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `RiskBreach` (M1) implemented in `blive.domain.events` (relocated from `blive.risk.checks` to honour the layer hierarchy); `DomainEvent = OrderEvent | ConnectionStatus | RiskBreach`. Other catalogued events (M2+) remain forward-planned, not yet code.
 - **v0.3 (2026-05-01)** — M2-IB.3b-i implementation pass. M2 event types now live: `AccountUpdate` (per ADR-033 — wraps `AccountSnapshot` with topic-friendly identity; emission cadence + diff-suppress timer is the M2-IB.3b-i follow-up) and `ArtefactFreshnessWarning` (per ADR-022 — RC-12 warn-threshold at 21d; the structured `age_days` / threshold payload). Both implemented in `blive.domain.events`; `DomainEvent = OrderEvent | ConnectionStatus | RiskBreach | AccountUpdate | ArtefactFreshnessWarning`. `IBBroker.connect/disconnect` emits `ConnectionStatus` records (the M0-catalogued `broker.connection` row is now exercised by IB in addition to PaperBroker). M4/M5/M7 event types (`KillSwitchArmed/Cleared`, `*DriftDetected`, `ParityBreach/Failed`) remain forward-planned. Status stays STABLE — additive widening, no contract change.
+- **v0.3.1 (2026-05-01)** — M2-IB.3b-i-timer follow-up. `IBBroker` now ships the 30s diff-suppress `AccountUpdate` emission timer per ADR-033 §"Decision" item 2. Per-field thresholds: currency-unit 0.01 (equity / cash_by_ccy / buying_power / gross_exposure / net_exposure / margin_used); leverage 0.001 (3 d.p.). Background task started in `IBBroker.connect`, cancelled in `IBBroker.disconnect`. First tick after connect emits the baseline (no prior snapshot to diff against); subsequent ticks emit only on above-threshold change. The `account.update` row's "consumer set" stays unchanged (persistence subsampled, UI). `BrokerEvent` union widened to `OrderEvent | ConnectionStatus | AccountUpdate` (IBBroker's events queue now emits these too). Status stays STABLE — implementation-completeness only, no inventory contract change.
