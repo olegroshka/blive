@@ -101,8 +101,10 @@ async def _run_probe() -> int:
         print("\nFix:")
         print("  - Confirm IB Gateway / TWS is running and logged in to the paper account.")
         print(f"  - Confirm it is listening on TCP {credentials.host}:{credentials.port}.")
-        print("  - Confirm 'Enable ActiveX and Socket Clients' is checked under")
-        print("    File > Global Configuration > API > Settings.")
+        print("  - In IB Gateway: Configuration > API > Settings — confirm the Socket")
+        print(f"    port matches {credentials.port} and 127.0.0.1 is in the Trusted IPs list.")
+        print("    (Note: 'Enable ActiveX and Socket Clients' is a TWS Desktop option, not")
+        print("    a Gateway one — Gateway always serves the API at the configured Socket port.)")
         print(f"  - Confirm clientId={credentials.client_id} is not in use by another")
         print("    process (TWS desktop, another blive instance, an old gateway, etc.).")
         return 3
