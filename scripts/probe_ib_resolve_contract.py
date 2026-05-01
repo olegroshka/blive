@@ -169,10 +169,10 @@ async def _run_probe() -> int:
     await client.disconnect()
     print(f"    is_connected={client.is_connected}")
 
-    _print_header("OK — instrument resolve clean")
+    _print_header("OK -- instrument resolve clean")
     print(
-        "ADR-032 ready to flip PROPOSED → ACCEPTED; DD-7 ready to flip "
-        "DRAFT → STABLE. Paste output to the agent for the substrate-flip "
+        "ADR-032 ready to flip PROPOSED -> ACCEPTED; DD-7 ready to flip "
+        "DRAFT -> STABLE. Paste output to the agent for the substrate-flip "
         "commit."
     )
     print(f"\n    CAC.PA conId = {conid}")

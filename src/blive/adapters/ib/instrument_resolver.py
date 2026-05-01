@@ -67,6 +67,42 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
 }
 
 
+# --- DD-7 §3.1: Yahoo Finance / EODHD exchange-suffix → MIC -----------------
+
+# Yahoo Finance and EODHD encode the listing exchange in the ticker suffix
+# (e.g. "CAC.PA" for Euronext Paris, "BARC.L" for London). IB's TWS API
+# uses the *bare* ticker on the corresponding primary exchange. When the
+# blive Instrument's symbol arrives with a known Yahoo suffix matching its
+# venue, the IB resolver strips the suffix before constructing the
+# Contract. Per [ADR-041](../../../../docs/decisions/DECISIONS.md#adr-041--yahoo-suffix-translation-in-ib-instrument-resolver):
+# the broker-neutral Instrument keeps the EODHD-friendly form;
+# adapter-specific translation lives here.
+#
+# Confirmed at M2-IB.3a probe (2026-05-01): IB rejects "CAC.PA" /
+# accepts "CAC" on SBF (conId=11183823). Other rows are best-known-as-of
+# the Yahoo suffix convention; lazy-validated when the corresponding
+# instrument is first resolved.
+_YAHOO_SUFFIX_BY_MIC: Mapping[str, str] = {
+    "XPAR": ".PA",  # Euronext Paris
+    "XLON": ".L",  # London Stock Exchange
+    "XETR": ".DE",  # Xetra (Deutsche Börse)
+    "XAMS": ".AS",  # Euronext Amsterdam
+}
+
+
+def _ib_symbol(instrument: Instrument) -> str:
+    """Translate the broker-neutral symbol to IB's wire form.
+
+    When the instrument's ``symbol`` ends with a Yahoo Finance / EODHD
+    exchange suffix matching its ``venue`` MIC, strip the suffix. Otherwise
+    pass through unchanged. Per ADR-041 + DD-7 §3.1.
+    """
+    suffix = _YAHOO_SUFFIX_BY_MIC.get(instrument.venue)
+    if suffix is not None and instrument.symbol.endswith(suffix):
+        return instrument.symbol[: -len(suffix)]
+    return instrument.symbol
+
+
 # --- Public errors ----------------------------------------------------------
 
 
@@ -159,7 +195,7 @@ class IBInstrumentResolver:
         multiplier_str = "" if instrument.multiplier == Decimal("1") else str(instrument.multiplier)
 
         return ib_async.Contract(
-            symbol=instrument.symbol,
+            symbol=_ib_symbol(instrument),
             secType=sec_type,
             currency=instrument.currency,
             exchange=exchange,

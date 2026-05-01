@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-04-28
-version: 0.11
+last_reviewed: 2026-05-01
+version: 0.12
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -1193,8 +1193,8 @@ Three algorithm options exist (token bucket, leaky bucket, sliding window) and t
 
 ## ADR-032 — Instrument resolution policy: blive Instrument ↔ IB Contract
 
-- **status:** PROPOSED
-- **date:** 2026-04-27
+- **status:** ACCEPTED
+- **date:** 2026-04-27 (PROPOSED) / 2026-05-01 (ACCEPTED at M2-IB.3a-resolved)
 - **decider:** Oleg (with Claude)
 - **supersedes:** none
 - **resolves:** —
@@ -1761,6 +1761,82 @@ Linux VM / Docker / IBC are **deferred to the production cutover at M8+** ([REQU
 
 ---
 
+## ADR-041 — Yahoo-suffix translation in IB instrument resolver
+
+- **status:** ACCEPTED
+- **date:** 2026-05-01
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (refines [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract))
+- **resolves:** —
+
+### Context
+
+The M2-IB.3a `IBInstrumentResolver.resolve()` wire-level smoke test
+([`scripts/probe_ib_resolve_contract.py`](../../scripts/probe_ib_resolve_contract.py))
+ran against IB Paper Gateway 2026-05-01 with the Phase 1 instrument
+`Instrument(symbol="CAC.PA", venue="XPAR", currency="EUR", asset_class=ETF, tradability="spot")`
+and **failed** with IB error 200 (`No security definition has been
+found for the request, contract: Contract(secType='STK', symbol='CAC.PA', exchange='SBF', currency='EUR')`).
+
+A diagnostic probe of alternate symbols on `SBF` showed:
+
+| Symbol attempted | IB result |
+|---|---|
+| `CAC.PA` | error 200 (unknown contract) |
+| `CAC` | **resolved**, `conId=11183823`, `primaryExchange=SBF` |
+| `LYXCAC` | error 200 |
+| `CAC40` | error 200 |
+
+The `.PA` suffix is **Yahoo Finance / EODHD convention** for "this ticker is listed on Euronext Paris". IB's TWS API expects the **bare exchange ticker**. The same convention applies to other European venues — `BARC.L` on Yahoo / EODHD is `BARC` on IB's `LSE`; `SAP.DE` is `SAP` on `IBIS`.
+
+[ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) names the Phase 1 instrument as `CAC.PA` (matching the EODHD historical-data fixture path); btest's strategy module receives the same broker-neutral `Instrument` and the parquet-backed [`PaperMarketData`](../../src/blive/adapters/paper/market_data.py) reads from a fixture keyed by that symbol. Changing the canonical symbol to `CAC` would break the EODHD path; keeping `CAC.PA` and translating in the IB adapter keeps the broker-neutral identity stable while satisfying IB's wire format.
+
+### Decision
+
+The IB resolver strips known **Yahoo Finance / EODHD exchange suffixes** from `Instrument.symbol` when the suffix matches the instrument's `venue` MIC, before constructing the `ib_async.Contract`. Implementation: a small constant table `_YAHOO_SUFFIX_BY_MIC` in [`blive.adapters.ib.instrument_resolver`](../../src/blive/adapters/ib/instrument_resolver.py) and a `_ib_symbol(instrument)` helper called by `to_contract`.
+
+Phase 1 + adjacent rows ([DD-7 §3.1](../dd/instrument_dictionary.md#31-yahoo-finance--eodhd-exchange-suffix--mic)):
+
+| MIC | Yahoo suffix | Example |
+|---|---|---|
+| `XPAR` | `.PA` | `CAC.PA` → `CAC` (validated; conId=11183823) |
+| `XLON` | `.L` | `BARC.L` → `BARC` |
+| `XETR` | `.DE` | `SAP.DE` → `SAP` |
+| `XAMS` | `.AS` | (post-M8 candidate) |
+
+Symbols **not** ending in their venue's Yahoo suffix pass through unchanged (e.g. `AAPL` on `XNAS`). Symbols with a Yahoo-style suffix on a non-matching MIC also pass through (e.g. `ABC.PA` on `XNAS` — `.PA` is XPAR-only convention; cross-venue stripping would be unsafe).
+
+The translation lives **only** in the IB resolver. The broker-neutral `Instrument` retains its EODHD-friendly form so the same dataclass round-trips through btest's `parquet://` / `eodhd://` data sources without translation. This matches the discipline ADR-004 / ADR-032 establish: broker-specific quirks live in the broker adapter; the domain stays portable.
+
+### Alternatives Considered
+
+1. **Per-`Instrument` IB-side override field** (e.g. `Instrument.ib_symbol: str | None`). Rejected: bloats the broker-neutral type with broker-specific data; not symmetric across brokers; defeats the abstraction. The adapter is the right home for venue translation.
+2. **Change the canonical Phase 1 `symbol` to `CAC`** and have the EODHD adapter add `.PA` when fetching. Rejected: requires re-authoring the btest strategy module; breaks the parquet-fixture path (`tests_slow/fixtures/paper_market_data/{venue}/CAC.PA_1d.parquet`); contradicts [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) prose; the EODHD-suffix convention is what every research consumer of the data uses.
+3. **Generic suffix-stripping heuristic** (any `.X` suffix on any venue). Rejected: false-positives. A symbol legitimately containing a dot (`BRK.A`, `BRK.B`) would be stripped incorrectly; the Yahoo convention is venue-specific by design.
+4. **Lazy fallback: try literal symbol first, then strip on `error 200`**. Rejected: implicit fallback masks diagnostic value; the canonical `CAC.PA` → `CAC` mapping is stable and testable once-and-done.
+
+### Consequences
+
+- **Positive:** `Instrument(symbol="CAC.PA", venue="XPAR", ...)` resolves on IB Paper as expected; the broker-neutral identity stays unchanged; the EODHD / parquet data path is unaffected.
+- **Positive:** Translation table is small, declarative, and lives next to the `_MIC_TO_IB_EXCHANGE` table it complements. New venues add a single row.
+- **Positive:** Symmetric with the IG analogue's epic-construction logic (per [DD-8 §3](../dd/ig_instrument_dictionary.md)) — both adapters do venue-specific translation; neither leaks into the domain.
+- **Negative:** The `_YAHOO_SUFFIX_BY_MIC` table is hand-curated; new venues need an explicit row when they land. Mitigated by the table being a one-line addition per venue and by the failing instrument producing a clear "zero candidates" error that points the operator at the missing row.
+- **Negative:** Yahoo Finance occasionally renames suffixes (rare). When that happens, the symbol stops resolving on IB and the operator updates the row. No regression risk to non-IB paths.
+- **Follow-ups:**
+  - DD-7 §3.1 row added in this commit batch (Yahoo-suffix sub-table).
+  - When Phase 2 / Phase 3 land US strategies, no Yahoo suffix needed (US listings on Yahoo are unsuffixed); the table only matters for European venues.
+  - If a future strategy uses an instrument whose IB symbol differs from the bare-ticker form (rare; e.g. `BRK B` on NYSE), the per-instrument override is a possible escape hatch — re-evaluate at that point.
+
+### Cross-References
+
+- [ADR-004](#adr-004--hexagonal-portsadapters-with-import-linter-enforcement) — broker-neutrality contract; this translation honours it.
+- [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — Phase 1 `CAC.PA` instrument unchanged.
+- [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) — instrument resolution policy this ADR refines.
+- [DD-7 §3.1](../dd/instrument_dictionary.md#31-yahoo-finance--eodhd-exchange-suffix--mic) — Yahoo-suffix sub-table.
+- [`scripts/probe_ib_resolve_contract.py`](../../scripts/probe_ib_resolve_contract.py) — wire-level smoke test that surfaced the issue.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1774,3 +1850,4 @@ Linux VM / Docker / IBC are **deferred to the production cutover at M8+** ([REQU
 - **v0.9 (2026-04-27)** — operator approval moment. Eight ADRs flipped PROPOSED → ACCEPTED en bloc: ADR-030 (per-archetype dispatch — broker-agnostic; resolves OQ-030), ADR-033 (AccountUpdate cadence — broker-agnostic), ADR-034 (multi-broker registry; load-bearing), ADR-035 (secrets handling discipline), ADR-036 (IG driver), ADR-037 (Instrument.tradability), ADR-038 (IG rate-limit defaults), ADR-039 (Phase 1 under IG bridge). **Two ADRs stay PROPOSED**: ADR-031 (IB-specific rate-limit defaults; revisit when M2-IB resumes) and ADR-032 (IB-specific instrument resolution; revisit when M2-IB resumes). Updated OQ-030 status RESOLVED-BY-ADR-030 in OPEN_QUESTIONS.md.
 - **v0.10 (2026-04-28)** — M2-IB.2 milestone flip. ADR-031 (token-bucket rate limiter shape for IB adapters) PROPOSED → ACCEPTED: the algorithm shipped at M2-IG.2 inside `blive.adapters.shared.rate_limiter` and the IB-specific defaults table now lives at `blive.adapters.ib.rate_limiter.IB_DEFAULT_RATE_LIMITS` (`global` 20/s, `historical` 50/600s per [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults)). `IBClient.connect()` exercises the limiter via `acquire("global")` per the M2-IB.2 unit-test suite. Body of ADR-031 unchanged (append-only); status field flipped + a parenthetical PROPOSED→ACCEPTED date trail added in the ADR header. **ADR-032 stays PROPOSED** until M2-IB.3 IBInstrumentResolver exercises `qualifyContractsAsync` against IB Paper.
 - **v0.11 (2026-04-28)** — M2-IB.3 prereq closure. Added ADR-040 (Phase 1 deployment target: Windows host with native IB Gateway; no Docker / IBC for paper-mode dev; Linux VM revisited at M8 production cutover). Drafted PROPOSED, accepted same-session per the established same-day-ACCEPTED pattern; status flipped to ACCEPTED. Closes the "Decide deployment target" item from [TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md). Daily 23:45 ET TWS-restart handled by operator-managed manual relogin during the M2-IB.5 ≥5-trading-day run; blive's reconciliation handles the disconnect/reconnect transient unchanged.
+- **v0.12 (2026-05-01)** — M2-IB.3a-resolved milestone flips. ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`) PROPOSED → ACCEPTED: `IBInstrumentResolver` exercised against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` 2026-05-01) and resolved Phase 1 instrument cleanly (`CAC.PA` → `conId=11183823`). Body of ADR-032 unchanged (append-only); status field flipped + PROPOSED→ACCEPTED date trail added in the ADR header. Added ADR-041 (Yahoo-suffix translation in IB instrument resolver) — drafted PROPOSED then ACCEPTED in same commit per established same-day-ACCEPTED pattern; refines ADR-032 with the EODHD/Yahoo `.PA` suffix-stripping rule discovered when the first probe attempt failed with IB error 200 on `CAC.PA`. Yahoo-suffix table seeded for `XPAR/.PA`, `XLON/.L`, `XETR/.DE`, `XAMS/.AS`. The broker-neutral `Instrument` keeps its EODHD-friendly form per ADR-004; only the IB resolver translates. **All ADRs accepted as of v0.12**: ADR-001..041 ACCEPTED. No PROPOSED ADRs remain.

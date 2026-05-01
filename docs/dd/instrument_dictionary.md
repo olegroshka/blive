@@ -1,10 +1,10 @@
 ---
 id: DD-7
 title: Instrument Dictionary (`blive.Instrument` ↔ IB `Contract` / `ConID`)
-status: DRAFT
+status: STABLE
 owner: Claude
 last_reviewed: 2026-05-01
-version: 0.2
+version: 1.0
 sources:
   - https://interactivebrokers.github.io/tws-api/contracts.html  # accessed 2026-04-27
   - https://github.com/ib-api-reloaded/ib_async                  # accessed 2026-04-27
@@ -88,6 +88,21 @@ Phase 1 only needs one row; the table grows per venue.
 
 Sourced from [KB-2 §5](../kb/ib_capability_matrix.md#5-routing). Unknown MICs raise `InstrumentNotResolvable`; the operator extends the table when a new venue lands.
 
+## 3.1 Yahoo Finance / EODHD exchange-suffix → MIC
+
+Yahoo Finance and EODHD encode the listing exchange in the ticker suffix (e.g. `CAC.PA` for Euronext Paris, `BARC.L` for London). IB's TWS API uses the **bare** ticker on the corresponding primary exchange. Per [ADR-041](../decisions/DECISIONS.md#adr-041--yahoo-suffix-translation-in-ib-instrument-resolver), the IB resolver strips the suffix when it matches the instrument's `venue` MIC.
+
+| MIC (ISO 10383) | Yahoo suffix | IB sees | Example |
+|---|---|---|---|
+| `XPAR` | `.PA` | bare ticker | `CAC.PA` → `CAC` (validated 2026-05-01: `conId=11183823`) |
+| `XLON` | `.L` | bare ticker | `BARC.L` → `BARC` |
+| `XETR` | `.DE` | bare ticker | `SAP.DE` → `SAP` |
+| `XAMS` | `.AS` | bare ticker | (post-M8 candidate) |
+
+Symbols **not** ending in their venue's Yahoo suffix pass through unchanged (e.g. `AAPL` on `XNAS`). Symbols with a Yahoo-style suffix on a non-matching MIC also pass through (e.g. `ABC.PA` on `XNAS` — `.PA` is XPAR-only convention; the resolver doesn't apply the rule cross-venue). Both cases are tested.
+
+The broker-neutral `Instrument` keeps its EODHD-friendly form so the same dataclass round-trips through btest's `parquet://` and `eodhd://` data sources without translation; the IB-specific stripping lives only in the IB resolver.
+
 ## 4. ConID resolution + caching
 
 Per [ADR-032](../decisions/DECISIONS.md#adr-032--instrument-resolution-policy-blive-instrument--ib-contract):
@@ -144,3 +159,4 @@ None blocking M2. When Phase 2 introduces multi-venue routing for the same instr
 
 - **v0.1 (2026-04-27)** — initial DRAFT at M2 entry; substrate for ADR-032. Promotes to STABLE when M2 IBBroker successfully exercises the path against IB Paper.
 - **v0.2 (2026-05-01)** — M2-IB.3a refinement. §5 public surface updated: class renamed `InstrumentResolver` → `IBInstrumentResolver` to match implementation + IG-side parallelism (`IGInstrumentResolver`); constructor signature refined from `(ib, rate_limiter)` to `(client: IBClient)` because the M2-IB.2 :class:`IBClient` already encapsulates both — taking it directly avoids duplicate wiring at the factory boundary and matches the IG analogue. The functional contract (lazy resolve + cache + raises on zero / multiple / zero-conId / unmapped fields) is unchanged. Status stays DRAFT — STABLE flip remains gated on first successful Contract resolution against IB Paper (handled at the `M2-IB.3a-resolved` commit when the operator runs `scripts/probe_ib_resolve_contract.py`).
+- **v1.0 (2026-05-01)** — M2-IB.3a-resolved STABLE flip. The Phase 1 instrument `Instrument(symbol="CAC.PA", venue="XPAR", currency="EUR", asset_class=ETF, tradability="spot")` resolved cleanly against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` reported `conId=11183823 primaryExchange=SBF` in 0.04s; cache hit on second resolve in 0ms). DD-7 §1 field map + §2 secType table + §3 MIC→exchange table + §4 ConID lazy-resolve + §5 IBInstrumentResolver contract + new §3.1 Yahoo-suffix sub-table all empirically validated. Added §3.1 (Yahoo Finance / EODHD exchange-suffix → MIC) per [ADR-041](../decisions/DECISIONS.md#adr-041--yahoo-suffix-translation-in-ib-instrument-resolver) — IB resolver strips `.PA` / `.L` / `.DE` / `.AS` suffixes when the suffix matches the venue MIC. Status DRAFT → STABLE; future venue additions to §3 / §3.1 are routine refinements rather than substrate-flipping changes.

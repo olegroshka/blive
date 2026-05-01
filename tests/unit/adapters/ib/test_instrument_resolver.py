@@ -113,10 +113,14 @@ def test_to_contract_etf_spot_maps_to_stk_sbf(
     clock: SimClock,
     cac_pa: Instrument,
 ) -> None:
-    """ETF tradability=spot on XPAR → STK on SBF (DD-7 §2 + §3, Phase 1)."""
+    """ETF tradability=spot on XPAR → STK on SBF (DD-7 §2 + §3, Phase 1).
+
+    The Yahoo-style ``.PA`` suffix is stripped per ADR-041 + DD-7 §3.1
+    — IB uses bare exchange tickers (``CAC`` not ``CAC.PA``).
+    """
     resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
     contract = resolver.to_contract(cac_pa)
-    assert contract.symbol == "CAC.PA"
+    assert contract.symbol == "CAC"  # ".PA" stripped (Yahoo→IB)
     assert contract.secType == "STK"
     assert contract.exchange == "SBF"
     assert contract.currency == "EUR"
@@ -177,6 +181,103 @@ def test_to_contract_multiplier_other_than_one_serialises_to_string(
     )
     contract = resolver.to_contract(instrument)
     assert contract.multiplier == "50"
+
+
+# --- to_contract: Yahoo-suffix translation (ADR-041 / DD-7 §3.1) -----------
+
+
+def test_to_contract_strips_dot_l_suffix_on_xlon(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """``BARC.L`` on XLON → IB symbol ``BARC`` on LSE."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="BARC.L",
+        venue="XLON",
+        currency="GBP",
+        asset_class=AssetClass.EQUITY,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.symbol == "BARC"
+    assert contract.exchange == "LSE"
+
+
+def test_to_contract_strips_dot_de_suffix_on_xetr(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """``SAP.DE`` on XETR → IB symbol ``SAP`` on IBIS."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="SAP.DE",
+        venue="XETR",
+        currency="EUR",
+        asset_class=AssetClass.EQUITY,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.symbol == "SAP"
+    assert contract.exchange == "IBIS"
+
+
+def test_to_contract_passes_through_unsuffixed_symbol_unchanged(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """``AAPL`` on XNAS has no Yahoo suffix → unchanged."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="AAPL",
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.EQUITY,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.symbol == "AAPL"
+
+
+def test_to_contract_does_not_strip_mismatched_suffix(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """A symbol ending in ``.PA`` on a non-XPAR venue is NOT stripped — the
+    Yahoo convention couples suffix to listing exchange. ``ABC.PA`` on
+    XNAS isn't a Yahoo-style ticker for that venue; pass through."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="ABC.PA",
+        venue="XNAS",  # mismatched: .PA suffix is XPAR-only convention
+        currency="USD",
+        asset_class=AssetClass.EQUITY,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.symbol == "ABC.PA"  # not stripped
+
+
+def test_to_contract_passes_through_when_venue_has_no_yahoo_suffix(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """XNAS / XNYS have no Yahoo-suffix entry → no stripping attempted."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="QQQ",
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.symbol == "QQQ"
 
 
 # --- to_contract: rejection paths -------------------------------------------
@@ -268,7 +369,11 @@ async def test_resolve_passes_constructed_contract_to_qualify(
     clock: SimClock,
     cac_pa: Instrument,
 ) -> None:
-    """qualifyContractsAsync receives the Contract built by to_contract."""
+    """qualifyContractsAsync receives the Contract built by to_contract.
+
+    Symbol is the Yahoo-stripped IB form (``CAC``), not the Yahoo form
+    (``CAC.PA``). Per ADR-041 + DD-7 §3.1.
+    """
     qualified = ib_async.Contract(conId=1)
     mock_ib = _make_mock_ib(qualify_returns=[qualified])
     resolver = _make_resolver(credentials, rate_limiter, clock, mock_ib)
@@ -276,7 +381,7 @@ async def test_resolve_passes_constructed_contract_to_qualify(
     await resolver.resolve(cac_pa)
 
     sent = mock_ib.qualifyContractsAsync.await_args.args[0]
-    assert sent.symbol == "CAC.PA"
+    assert sent.symbol == "CAC"
     assert sent.secType == "STK"
     assert sent.exchange == "SBF"
     assert sent.currency == "EUR"
