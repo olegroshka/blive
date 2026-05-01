@@ -3,8 +3,8 @@ id: DD-2
 title: Event Schemas
 status: DRAFT
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.1
+last_reviewed: 2026-05-01
+version: 0.2
 sources:
   - INV-5 (event catalogue)
   - DD-1 §2.6, §2.8, §2.10 (OrderEvent, AccountSnapshot, ConnectionStatus)
@@ -154,13 +154,7 @@ ArtefactFreshnessWarning(
 
 ## 6. The `DomainEvent` union (current state)
 
-Tracked in [INV-5 §2](../inv/domain_events.md#2-the-domainevent-union). Current implementation in `blive.domain.events`:
-
-```python
-DomainEvent: TypeAlias = OrderEvent | ConnectionStatus | RiskBreach
-```
-
-When M2 lands `AccountUpdate` and `ArtefactFreshnessWarning`, the union widens to:
+Tracked in [INV-5 §2](../inv/domain_events.md#2-the-domainevent-union). Current implementation in `blive.domain.events` (post M2-IB.3b-i):
 
 ```python
 DomainEvent: TypeAlias = (
@@ -193,3 +187,4 @@ None blocking M2. Future:
 ## Changelog
 
 - **v0.1 (2026-04-27)** — initial DRAFT at M2 entry. Covers M0 events (`OrderEvent`, `ConnectionStatus`), M1 (`RiskBreach`), and the M2 additions (`AccountUpdate` per ADR-033, `ArtefactFreshnessWarning` per ADR-022). Later events catalogued in [INV-5](../inv/domain_events.md) but pending implementation.
+- **v0.2 (2026-05-01)** — M2-IB.3b-i implementation pass. M2 event types now live in `blive.domain.events`: `AccountUpdate(snapshot, time_utc)` invariants enforced (`time_utc >= snapshot.taken_at` defensive check; emission cadence + diff-suppress timer per ADR-033 lives on the IB adapter side, M2-IB.3b-i follow-up); `ArtefactFreshnessWarning` invariants enforced (non-empty strategy_id / model_name / path; positive age_days; warning_threshold_days < hard_threshold_days). §6 union snippet updated to reflect the now-current `DomainEvent` shape (5 members: M0+M1+M2 subset). M4/M5/M7 events remain forward-planned.

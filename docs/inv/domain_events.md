@@ -3,8 +3,8 @@ id: INV-5
 title: Domain Events
 status: STABLE
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.2
+last_reviewed: 2026-05-01
+version: 0.3
 sources:
   - REQUIREMENTS.md §5.3 (order events)
   - REQUIREMENTS.md §5.5 (risk events, kill-switch)
@@ -76,28 +76,38 @@ events that are translated into domain events at the adapter boundary.
 
 ## 2. The `DomainEvent` union
 
-The aggregate type used by [INV-6 §1.4](ports_adapters.md#14-persistenceport)'s `PersistencePort.append` and `EventBusPort.publish`:
+The aggregate type used by [INV-6 §1.4](ports_adapters.md#14-persistenceport)'s `PersistencePort.append` and `EventBusPort.publish`. Eventual full union:
 
 ```python
 DomainEvent = (
     OrderEvent
     | ConnectionStatus
     | RiskBreach            # M1
+    | AccountUpdate         # M2
+    | ArtefactFreshnessWarning  # M2
     | ParityBreach          # M7
     | ParityDiagnosticFailed  # M7
     | KillSwitchArmed       # M4
     | KillSwitchCleared     # M4
-    | AccountUpdate         # M2
     | OrderDriftDetected    # M5
     | PositionDriftDetected # M5
     | AccountDriftDetected  # M5
-    | ArtefactFreshnessWarning  # M2
 )
 ```
 
-For M0, `DomainEvent = OrderEvent | ConnectionStatus`. The union widens
-milestone-by-milestone; the implementation in `blive.domain.events`
-adds members as new types land (each addition bumps this inventory).
+Current implementation in `blive.domain.events` (post M2-IB.3b-i):
+
+```python
+DomainEvent = (
+    OrderEvent
+    | ConnectionStatus
+    | RiskBreach
+    | AccountUpdate
+    | ArtefactFreshnessWarning
+)
+```
+
+The union widens milestone-by-milestone; each addition bumps this inventory.
 
 ## 3. Persistence ordering rule
 
@@ -130,3 +140,4 @@ milestones land.
 
 - **v0.1 (2026-04-26)** — initial DRAFT at M0. M0 events (order events, connection) live; later events catalogued for forward-planning.
 - **v0.2 (2026-04-27)** — promoted to STABLE at M1 close. `RiskBreach` (M1) implemented in `blive.domain.events` (relocated from `blive.risk.checks` to honour the layer hierarchy); `DomainEvent = OrderEvent | ConnectionStatus | RiskBreach`. Other catalogued events (M2+) remain forward-planned, not yet code.
+- **v0.3 (2026-05-01)** — M2-IB.3b-i implementation pass. M2 event types now live: `AccountUpdate` (per ADR-033 — wraps `AccountSnapshot` with topic-friendly identity; emission cadence + diff-suppress timer is the M2-IB.3b-i follow-up) and `ArtefactFreshnessWarning` (per ADR-022 — RC-12 warn-threshold at 21d; the structured `age_days` / threshold payload). Both implemented in `blive.domain.events`; `DomainEvent = OrderEvent | ConnectionStatus | RiskBreach | AccountUpdate | ArtefactFreshnessWarning`. `IBBroker.connect/disconnect` emits `ConnectionStatus` records (the M0-catalogued `broker.connection` row is now exercised by IB in addition to PaperBroker). M4/M5/M7 event types (`KillSwitchArmed/Cleared`, `*DriftDetected`, `ParityBreach/Failed`) remain forward-planned. Status stays STABLE — additive widening, no contract change.

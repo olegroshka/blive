@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import TypeAlias
 from uuid import UUID
 
 from blive.domain.types import (
+    AccountSnapshot,
     Fill,
     OrderEventKind,
     Severity,
@@ -128,10 +130,87 @@ class RiskBreach:
         return Severity.LOW
 
 
+# --- AccountUpdate (INV-5 row `account.update`; M2) -------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AccountUpdate:
+    """Periodic account-snapshot emission per [ADR-033](../decisions/DECISIONS.md#adr-033--accountupdate-event-shape-and-sampling-cadence).
+
+    Wraps the existing :class:`AccountSnapshot` (DD-1 §2.8) with a
+    topic-friendly type identity for the [INV-5](../inv/domain_events.md)
+    catalogue and the :data:`DomainEvent` union. Cadence + diff-suppress
+    thresholds live on the IB adapter side (the field-level emission
+    rule is per ADR-033 §"Decision"; not part of this dataclass).
+    """
+
+    snapshot: AccountSnapshot
+    time_utc: datetime
+
+    def __post_init__(self) -> None:
+        _require_utc(self.time_utc, "AccountUpdate.time_utc")
+        # Per DD-2 §4: time_utc equals snapshot.taken_at by convention.
+        # Don't enforce strict equality (clock skew between subsample
+        # tick and snapshot construction is possible); enforce ordering
+        # only as a defensive check.
+        if self.time_utc < self.snapshot.taken_at:
+            raise ValueError(
+                f"AccountUpdate.time_utc ({self.time_utc}) must be >= "
+                f"snapshot.taken_at ({self.snapshot.taken_at})"
+            )
+
+
+# --- ArtefactFreshnessWarning (INV-5 row `artefact.freshness_warning`; M2) --
+
+
+@dataclass(frozen=True, slots=True)
+class ArtefactFreshnessWarning:
+    """RC-12 warn-threshold artefact-freshness event per [ADR-022](../decisions/DECISIONS.md#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning).
+
+    Triggered by the RiskEngine at the 21-day soft warn threshold; the
+    30-day hard threshold emits a :class:`RiskBreach` (RC-12, BLOCK)
+    instead. The structured payload (``age_days`` / thresholds) lets the
+    UI dashboard render a count-down badge that ``RiskBreach.detail``
+    couldn't carry.
+    """
+
+    strategy_id: str
+    model_name: str
+    path: str
+    age_days: Decimal
+    warning_threshold_days: int
+    hard_threshold_days: int
+    time_utc: datetime
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id:
+            raise ValueError("ArtefactFreshnessWarning.strategy_id must be non-empty")
+        if not self.model_name:
+            raise ValueError("ArtefactFreshnessWarning.model_name must be non-empty")
+        if not self.path:
+            raise ValueError("ArtefactFreshnessWarning.path must be non-empty")
+        if self.age_days <= 0:
+            raise ValueError(f"ArtefactFreshnessWarning.age_days must be > 0, got {self.age_days}")
+        if self.warning_threshold_days < 1:
+            raise ValueError(
+                f"ArtefactFreshnessWarning.warning_threshold_days must be >= 1, "
+                f"got {self.warning_threshold_days}"
+            )
+        if self.hard_threshold_days <= self.warning_threshold_days:
+            raise ValueError(
+                f"ArtefactFreshnessWarning.hard_threshold_days "
+                f"({self.hard_threshold_days}) must be > warning_threshold_days "
+                f"({self.warning_threshold_days})"
+            )
+        _require_utc(self.time_utc, "ArtefactFreshnessWarning.time_utc")
+
+
 # --- DomainEvent union (INV-5 §2) -------------------------------------------
 
-# M0+M1 subset. Widens as later milestones land per INV-5 §2.
-DomainEvent: TypeAlias = OrderEvent | ConnectionStatus | RiskBreach
+# M0 + M1 + M2 subset. Widens as M4/M5/M7 milestones land per INV-5 §2.
+DomainEvent: TypeAlias = (
+    OrderEvent | ConnectionStatus | RiskBreach | AccountUpdate | ArtefactFreshnessWarning
+)
 
 
 __all__ = [
@@ -140,5 +219,7 @@ __all__ = [
     "RiskBreach",
     "RiskBreachSeverity",
     "RiskCheckCode",
+    "AccountUpdate",
+    "ArtefactFreshnessWarning",
     "DomainEvent",
 ]
