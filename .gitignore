@@ -64,3 +64,10 @@ Thumbs.db
 # templates and demonstrate the schema.
 secrets/*.env
 !secrets/*.env.example
+
+# Ad-hoc operator screenshots dropped under docs/. The naming pattern
+# img*.png is reserved for transient communication artefacts that may
+# leak account ids / sensitive UI state and must NOT enter git. Permanent
+# documentation figures should live under docs/.../figures/ with a
+# specific name (e.g. parity-residual-decomposition.png), not img*.png.
+docs/img*.png

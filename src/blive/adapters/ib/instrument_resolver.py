@@ -1,0 +1,244 @@
+"""IB instrument resolver — :class:`Instrument` ↔ ``ib_async.Contract`` / ``conId``.
+
+Implements [DD-7 §5](../../../../docs/dd/instrument_dictionary.md#5-public-surface-m2-module)
+public surface per [ADR-032](../../../../docs/decisions/DECISIONS.md#adr-032--instrument-resolution-policy-blive-instrument--ib-contract).
+The IB analogue of :class:`blive.adapters.ig.instrument_resolver.IGInstrumentResolver`.
+
+Resolution flow (DD-7 §4):
+
+1. Build an ``ib_async.Contract`` from the broker-neutral
+   :class:`blive.domain.types.Instrument` via :meth:`to_contract` (sync,
+   no wire call) per the DD-7 §1 field map + §2 secType + §3 exchange
+   tables.
+2. On first :meth:`resolve` call for a given instrument, invoke
+   ``ib.qualifyContractsAsync(contract)``; the call consumes one
+   ``global`` token from the rate limiter.
+3. Cache the resulting ``conId`` keyed by full :class:`Instrument` tuple
+   equality. Subsequent calls return the cached id without a wire trip.
+4. Multiple candidates after qualification raise :class:`InstrumentAmbiguous`;
+   zero candidates / ``conId == 0`` raise :class:`InstrumentNotResolvable`.
+   The resolver **never silently picks** when the venue is ambiguous —
+   the caller must construct a more specific :class:`Instrument`.
+
+Cache lifetime: process. Corp-action invalidation via :meth:`clear_cache`
+(M5 reconciliation hook). All wire calls go through :class:`IBClient`'s
+:class:`TokenBucketRateLimiter` budget.
+"""
+
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+from typing import Mapping
+
+import ib_async
+
+from blive.adapters.ib.client import IBClient
+from blive.domain.types import AssetClass, Instrument
+
+log = logging.getLogger(__name__)
+
+
+# --- DD-7 §2: AssetClass → IB secType ---------------------------------------
+
+_ASSET_CLASS_TO_SEC_TYPE: Mapping[AssetClass, str] = {
+    AssetClass.EQUITY: "STK",
+    AssetClass.ETF: "STK",
+    AssetClass.INDEX: "IND",
+    AssetClass.FX: "CASH",
+    AssetClass.FUTURE: "FUT",
+    AssetClass.OPTION: "OPT",
+}
+
+
+# --- DD-7 §3: venue (MIC) → IB exchange -------------------------------------
+
+# Phase 1 needs only XPAR → SBF. Future Phase 2/3 / post-M8 venues add rows.
+# Keep this table internal — adapters import it via constants module if /
+# when other modules need to reuse the mapping.
+_MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
+    "XPAR": "SBF",
+    "XNAS": "NASDAQ",
+    "XNYS": "NYSE",
+    "ARCX": "ARCA",
+    "BATS": "BATS",
+    "XLON": "LSE",
+    "XETR": "IBIS",
+}
+
+
+# --- Public errors ----------------------------------------------------------
+
+
+class InstrumentNotResolvable(Exception):
+    """The instrument's ``(asset_class, tradability, venue)`` doesn't map to
+    any IB ``secType`` / ``exchange``, **or** ``qualifyContractsAsync`` returned
+    zero candidates / a candidate with ``conId == 0``."""
+
+
+class InstrumentAmbiguous(Exception):
+    """Multiple IB ``Contract`` candidates matched after qualification.
+
+    Carries the candidate list so the caller can pick by primary exchange
+    or currency; the resolver never silently picks per [ADR-032 §"Ambiguity"](../../../../docs/decisions/DECISIONS.md#adr-032--instrument-resolution-policy-blive-instrument--ib-contract).
+    """
+
+    def __init__(
+        self,
+        instrument: Instrument,
+        candidates: list[ib_async.Contract],
+    ) -> None:
+        self.instrument = instrument
+        self.candidates = candidates
+        candidate_summary = [(c.conId, c.primaryExchange, c.currency) for c in candidates]
+        super().__init__(
+            f"IB qualifyContractsAsync returned {len(candidates)} candidates "
+            f"for {instrument!r}; resolution requires a more specific Instrument. "
+            f"Candidates (conId, primaryExchange, currency): {candidate_summary}"
+        )
+
+
+# --- Resolver ---------------------------------------------------------------
+
+
+class IBInstrumentResolver:
+    """:class:`Instrument` → ``conId`` resolution + cache per DD-7.
+
+    Construct one of these per :class:`IBClient` instance. Cache is
+    in-process memory keyed by full :class:`Instrument` tuple equality
+    (the dataclass is frozen and hashable). Corp-action handling invokes
+    :meth:`clear_cache` from M5 reconciliation when that lands.
+    """
+
+    def __init__(self, client: IBClient) -> None:
+        self._client = client
+        self._conid_cache: dict[Instrument, int] = {}
+
+    # --- Public surface -----------------------------------------------------
+
+    def to_contract(self, instrument: Instrument) -> ib_async.Contract:
+        """Build a fresh ``ib_async.Contract`` from the instrument's fields.
+
+        Synchronous, pure — no wire call, no cache mutation. Does NOT fill
+        in ``conId``; that's :meth:`resolve`'s job. Used both by
+        :meth:`resolve` and by callers that need a Contract for a
+        ``reqHistoricalData`` / ``reqMktData`` call where pre-qualification
+        isn't desired.
+
+        Raises :class:`InstrumentNotResolvable` on field mappings the
+        resolver can't translate (CFD/spread_bet tradability, unknown
+        ``asset_class``, unknown ``venue`` MIC).
+        """
+        if instrument.tradability != "spot":
+            # Per ADR-037: IB Paper trades cash ETFs / shares (spot). CFD
+            # and spread-bet variants don't exist on IB retail; the IG
+            # adapter handles those.
+            raise InstrumentNotResolvable(
+                f"IB resolver does not support tradability="
+                f"{instrument.tradability!r}; IB retail trades spot only "
+                f"(per ADR-037 + ADR-021). Got instrument={instrument!r}"
+            )
+
+        sec_type = _ASSET_CLASS_TO_SEC_TYPE.get(instrument.asset_class)
+        if sec_type is None:
+            raise InstrumentNotResolvable(
+                f"IB resolver has no secType mapping for asset_class="
+                f"{instrument.asset_class!r}; extend "
+                f"_ASSET_CLASS_TO_SEC_TYPE or DD-7 §2."
+            )
+
+        exchange = _MIC_TO_IB_EXCHANGE.get(instrument.venue)
+        if exchange is None:
+            raise InstrumentNotResolvable(
+                f"IB resolver has no exchange mapping for MIC venue="
+                f"{instrument.venue!r}; extend _MIC_TO_IB_EXCHANGE or DD-7 §3."
+            )
+
+        # multiplier: empty string for STK / IND / CASH (DD-7 §1); the
+        # actual multiplier value for OPT / FUT.
+        multiplier_str = "" if instrument.multiplier == Decimal("1") else str(instrument.multiplier)
+
+        return ib_async.Contract(
+            symbol=instrument.symbol,
+            secType=sec_type,
+            currency=instrument.currency,
+            exchange=exchange,
+            multiplier=multiplier_str,
+        )
+
+    async def resolve(self, instrument: Instrument) -> int:
+        """Return the IB ``conId`` for the given instrument.
+
+        Lazy + cached. First call triggers ``ib.qualifyContractsAsync``
+        on the constructed Contract; on success, the integer ``conId``
+        is cached and returned.
+
+        Raises :class:`InstrumentNotResolvable` if the field mapping
+        rejects the instrument (see :meth:`to_contract`), if
+        ``qualifyContractsAsync`` returns zero candidates, or if the
+        single candidate has ``conId == 0`` (ib_async's "unqualified"
+        sentinel).
+
+        Raises :class:`InstrumentAmbiguous` if multiple candidates
+        match — the caller must construct a more specific Instrument
+        (typically by setting ``venue`` to the desired primary exchange's
+        MIC).
+
+        Consumes one token from the ``global`` rate-limiter bucket per
+        wire-level call (cache hits don't acquire).
+        """
+        if instrument in self._conid_cache:
+            return self._conid_cache[instrument]
+
+        contract = self.to_contract(instrument)
+        await self._client.rate_limiter.acquire("global")
+        # ib_async typing: qualifyContractsAsync is variadic and may return
+        # nested lists / Nones for individual inputs. We pass exactly one
+        # Contract, so the result is a flat list of qualified Contracts;
+        # filter to drop any Nones / nested lists defensively.
+        result = await self._client.ib.qualifyContractsAsync(contract)
+        candidates: list[ib_async.Contract] = [
+            c for c in result if isinstance(c, ib_async.Contract)
+        ]
+
+        if not candidates:
+            raise InstrumentNotResolvable(
+                f"IB qualifyContractsAsync returned zero candidates for "
+                f"{instrument!r}; the symbol/exchange/currency triple may be "
+                f"wrong, or the instrument may not be available under the "
+                f"market-data subscription tier."
+            )
+        if len(candidates) > 1:
+            raise InstrumentAmbiguous(instrument, candidates)
+
+        conid = candidates[0].conId
+        if not conid:
+            raise InstrumentNotResolvable(
+                f"IB qualifyContractsAsync returned a Contract with "
+                f"conId=0 for {instrument!r} — IB treats this as 'not "
+                f"qualified'; check the contract fields (symbol, exchange, "
+                f"currency) for a typo."
+            )
+
+        self._conid_cache[instrument] = conid
+        return conid
+
+    def clear_cache(self, instrument: Instrument | None = None) -> None:
+        """Drop one or all entries from the conId cache.
+
+        Called when M5 reconciliation observes corp-action drift (a fresh
+        ``conId`` arrives from the venue, indicating a contract change).
+        ``instrument=None`` flushes the entire cache; ``instrument=...``
+        drops just that one row.
+        """
+        if instrument is None:
+            self._conid_cache.clear()
+            return
+        self._conid_cache.pop(instrument, None)
+
+
+__all__ = [
+    "IBInstrumentResolver",
+    "InstrumentAmbiguous",
+    "InstrumentNotResolvable",
+]

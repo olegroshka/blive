@@ -3,8 +3,8 @@ id: DD-7
 title: Instrument Dictionary (`blive.Instrument` ↔ IB `Contract` / `ConID`)
 status: DRAFT
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.1
+last_reviewed: 2026-05-01
+version: 0.2
 sources:
   - https://interactivebrokers.github.io/tws-api/contracts.html  # accessed 2026-04-27
   - https://github.com/ib-api-reloaded/ib_async                  # accessed 2026-04-27
@@ -97,13 +97,13 @@ Per [ADR-032](../decisions/DECISIONS.md#adr-032--instrument-resolution-policy-bl
 3. **Cache lifetime:** process. ConIDs are stable for non-corp-action instruments; corp actions invalidate the lookup, observed either by IB returning a new conId on a fresh resolve or by an explicit `clear_cache(instrument)` accessor (M5 reconciliation hook).
 4. **Ambiguity:** when `qualifyContractsAsync()` returns more than one candidate, raise `InstrumentAmbiguous(instrument, candidates: list[ContractCandidate])` where each candidate carries `(conId, primaryExchange, currency)`. Never silently pick — the caller must construct a more specific `Instrument` (typically by setting `venue` to the desired primary exchange's MIC).
 
-## 5. Public surface (M2 module)
+## 5. Public surface (M2-IB.3a module)
 
 `blive.adapters.ib.instrument_resolver`:
 
 ```python
-class InstrumentResolver:
-    def __init__(self, ib: ib_async.IB, rate_limiter: TokenBucketRateLimiter) -> None: ...
+class IBInstrumentResolver:
+    def __init__(self, client: IBClient) -> None: ...
 
     async def resolve(self, instrument: Instrument) -> int:
         """Return the ConID, looking up + caching on first call. Honours the rate limiter."""
@@ -119,7 +119,14 @@ class InstrumentNotResolvable(Exception): ...
 class InstrumentAmbiguous(Exception): ...
 ```
 
-The resolver depends on the [ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter so first-resolve calls share the global throttle budget.
+The resolver takes a single :class:`blive.adapters.ib.client.IBClient`
+which encapsulates both the underlying ``ib_async.IB`` instance and the
+[ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters)
+:class:`TokenBucketRateLimiter`. This mirrors the IG analogue
+:class:`blive.adapters.ig.instrument_resolver.IGInstrumentResolver` and
+keeps factory wiring uniform across brokers per [ADR-034](../decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004).
+First-resolve calls acquire one ``global`` token from the limiter; cache
+hits do not.
 
 ## 6. Cross-References
 
@@ -136,3 +143,4 @@ None blocking M2. When Phase 2 introduces multi-venue routing for the same instr
 ## Changelog
 
 - **v0.1 (2026-04-27)** — initial DRAFT at M2 entry; substrate for ADR-032. Promotes to STABLE when M2 IBBroker successfully exercises the path against IB Paper.
+- **v0.2 (2026-05-01)** — M2-IB.3a refinement. §5 public surface updated: class renamed `InstrumentResolver` → `IBInstrumentResolver` to match implementation + IG-side parallelism (`IGInstrumentResolver`); constructor signature refined from `(ib, rate_limiter)` to `(client: IBClient)` because the M2-IB.2 :class:`IBClient` already encapsulates both — taking it directly avoids duplicate wiring at the factory boundary and matches the IG analogue. The functional contract (lazy resolve + cache + raises on zero / multiple / zero-conId / unmapped fields) is unchanged. Status stays DRAFT — STABLE flip remains gated on first successful Contract resolution against IB Paper (handled at the `M2-IB.3a-resolved` commit when the operator runs `scripts/probe_ib_resolve_contract.py`).
