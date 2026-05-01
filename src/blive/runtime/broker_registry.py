@@ -17,22 +17,22 @@ the rate limiter is at ``blive.adapters.shared.rate_limiter``).
 
 For M2-IG.2 the registry knows about ``"paper"``. ``"ig"`` is registered when
 M2-IG.3 lands the IG adapter; ``"ib"`` resumes from the
-``M2-substrate-IB.checkpoint`` when the IB Paper account reopens.
+``M2-substrate-IB.checkpoint`` when the IB Paper account reopens
+(M2-IB.3b-ii lands the IB factories alongside ``IBMarketData``).
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from blive.domain.ports import BrokerPort, MarketDataPort
-
 # --- Adapter imports (the load-bearing isolation point) ---------------------
 # Per ADR-034, these are the imports the import-linter contract whitelists.
 # Other broker adapters (`ig`, `ib`) join here as their packages land.
+from blive.adapters.ib import create_ib_broker, create_ib_market_data
 from blive.adapters.ig import create_ig_broker, create_ig_market_data
 from blive.adapters.paper.broker import PaperBroker
 from blive.adapters.paper.market_data import PaperMarketData
-
+from blive.domain.ports import BrokerPort, MarketDataPort
 
 # --- Public types -----------------------------------------------------------
 
@@ -63,6 +63,9 @@ _BROKER_FACTORIES: dict[str, BrokerFactory] = {
     # internally (the IGBroker constructor takes the wired-up dependency tree
     # rather than the raw config inputs the caller has).
     "ig": create_ig_broker,
+    # IB factory mirrors IG's shape: builds IBClient + IBInstrumentResolver
+    # internally; takes credentials + rate_limiter + clock from the caller.
+    "ib": create_ib_broker,
 }
 
 _MARKET_DATA_FACTORIES: dict[str, MarketDataFactory] = {
@@ -71,6 +74,10 @@ _MARKET_DATA_FACTORIES: dict[str, MarketDataFactory] = {
     # subscribe_trades raise NotImplementedError pending the Lightstreamer
     # integration at M2-IG.3 follow-up.
     "ig": create_ig_market_data,
+    # IB market-data: historical_bars (reqHistoricalDataAsync) works today;
+    # subscribe_bars / subscribe_trades raise NotImplementedError pending
+    # M2-IB.5 pipeline integration.
+    "ib": create_ib_market_data,
 }
 
 _BOOTSTRAP_BROKER_FACTORIES = dict(_BROKER_FACTORIES)
