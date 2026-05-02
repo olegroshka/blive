@@ -88,3 +88,69 @@ The amendment is consistent with the empirical findings the Gemini plan cites �
 **Status:** ACCEPTED 2026-04-26; implementation deferred to L0 + L1 milestone (pending OQ-029 resolution).
 
 ---
+
+## Amendment v0.3 — Session-Bootstrap Files (manual L0 baseline)
+
+**Date:** 2026-05-02
+
+**ADR:** [ADR-042 — Session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point](../decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point)
+
+### Motivation
+
+Amendment v0.2 ([ADR-026](../decisions/DECISIONS.md#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface)) committed the discipline to a five-layer agentic-execution stack but explicitly deferred concrete tooling under [OQ-028](../decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1) and [OQ-029](../decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1). In the interim, every session began with the operator manually pointing the agent at the canonical substrate — pasting `NEXT_PROMPT.md` content into the first message, or reminding the agent to read `CONTEXT_INVENTORY.md` before editing. The friction is small per session but compounds across the M0–M2-IB trajectory and is a known vector for skipped warm-up.
+
+Modern agent harnesses already load a small project-root file at session start (Claude Code reads `CLAUDE.md`; other platforms have analogous conventions — `AGENTS.md`, `.cursorrules`, system-prompt configuration). Treating that file as **substrate** — versioned, edit-protocol-governed, pointing at the canonical artefacts rather than restating them — converts the harness's existing auto-load into a near-zero-friction L0 implementation that does not require any of the agentic frameworks deferred under OQ-028.
+
+The pattern is *agent-agnostic in semantics, platform-specific in filename*. The discipline does not commit to any particular harness, vendor, or model generation; it commits to the bootstrap-file pattern, with concrete instances added as agent platforms come into use. This framing is essential: if the methodology coupled itself to one vendor's loader, it would inherit that vendor's lifecycle. By framing the pattern abstractly, the discipline endures across model swaps and platform churn.
+
+### What the amendment changes
+
+- The discipline's *content* is unchanged (six artefact categories, stable IDs, status lifecycle, edit protocol, propagation rules, anti-patterns all stand).
+- The discipline's *L0 surface* gains a manual-baseline implementation: session-bootstrap files at the project root, governed by the same protocol as any other substrate artefact.
+- A canonical-name convention emerges: each agent platform's auto-loaded file is the bootstrap instance for that platform. The first instance, [`CLAUDE.md`](../../CLAUDE.md), lands with this amendment; future instances (`AGENTS.md`, `.cursorrules`, etc.) add as needed without re-litigating the pattern.
+- The bootstrap file is a *pointer* to canonical substrate, never a restatement. SSOT applies; drift is mitigated by explicit `depends_on`, by the file being structurally a pointer (low restating surface by construction), and by milestone-freeze review.
+
+### Substrate artefacts changed
+
+- **NEW** — [`CLAUDE.md`](../../CLAUDE.md) (root, STABLE v1.0): first instance of the bootstrap-file pattern; Claude Code-specific shim around the canonical pointer set.
+- **`CONTEXT_PROTOCOL.md`** v0.3 → v0.4: §11.2 (L0 specification) extended to identify session-bootstrap files as the manual L0 baseline; status banner brought current; cross-references [ADR-042](../decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point).
+- **`CONTEXT_INVENTORY.md`**: §1 Representation Hierarchy gains a `0. Bootstrap` row for `CLAUDE.md`; CONTEXT_PROTOCOL row updated to v0.4; §7 file-layout placeholder promoted from comment to indexed entry; status banner v0.7 → v0.8.
+- **`docs/decisions/DECISIONS.md`** (KB-10) v0.12 → v0.13: ADR-042 added (ACCEPTED); index updated; changelog entry added.
+
+### Paper sections affected (for the next paper iteration)
+
+The next iteration of [`docs/method/paper/cognitive_cartography.tex`](paper/cognitive_cartography.tex) should reflect this amendment. Specific sections:
+
+- **§3 What We Inherit (foundations).** Add a subsection (or footnote) noting that mainstream agent harnesses had independently converged on auto-loaded project-root instruction files (Claude Code's `CLAUDE.md`, similar in other tools). The convergence echoes the broader pattern noted in Amendment v0.2: practitioners and tooling vendors arriving at structurally similar substrate solutions independently. Empirical anchor: nearly every commercially-shipping AI coding harness in 2025–26 defaulted to a small project-root markdown file for project-specific instruction; the discipline adopts the channel without coupling to a specific vendor.
+- **§8 What Tooling Could Do.** Mark "session-bootstrap file" as the simplest L0 implementation realisable today **without bespoke tooling** — the *zero-cost* point on the L0 cost / value curve. Useful as the leftmost anchor on the layer-adoption stack figure (F8 candidate annotation).
+- **§11 Human-governance / agent-execution.** Refine the L0 description to distinguish between (a) *static bootstrap files* (manual baseline; always available; vendor-incidental, discipline-essential) and (b) *substrate-aware warm-up agents* (richer L0; framework-dependent per OQ-028). The two coexist: an agent that reads `CLAUDE.md` and follows its pointers is performing static L0; an agent that walks `depends_on` closures from a task description is performing dynamic L0. The static instance is the durable fallback when the dynamic one is unavailable.
+- **F8 (substrate coverage) figure.** Optional small annotation on the L0 layer indicating both the static and dynamic variants, with the static variant labelled as the manual-baseline / always-available implementation.
+- **Abstract / closing.** No change to the thesis; one possible sentence to consider for the closing: *"The discipline's lowest-cost realisation is a small agent-agnostic pointer file at the project root — itself substrate — that any harness loads at session start. The methodology is not bound to any AI vendor or model generation; only the loader filename varies."*
+
+### A note on framing — why agent-agnostic matters
+
+A natural temptation is to describe the amendment as "Claude Code support" or "an instruction file for the Claude AI". That framing is wrong, both technically and methodologically:
+
+- **Technically**, the pattern is whatever-harness-you-have. Cursor, Aider, OpenAI Codex, Gemini CLI, Continue, IDE assistants, and unreleased future tools all converge on the same channel: a project-root file the harness loads automatically. Naming the discipline after one product would mis-state the surface.
+- **Methodologically**, Cognitive Cartography deliberately positions itself as the **governance schema over substrate execution**, agnostic to the executing layer (Amendment v0.2). Coupling to one vendor would contradict that posture and inherit that vendor's churn.
+
+The amendment therefore frames the pattern abstractly (session-bootstrap files; manual L0 baseline) and treats specific instances (`CLAUDE.md` here; potentially `AGENTS.md` elsewhere later) as platform-incidental shims around the same pointer set. The methodological commitment is to the **pattern**, not the **filename**.
+
+### Conversation context (for paper authors / reviewers)
+
+The amendment was triggered by the realisation that during the M0–M2-IB sessions the operator was repeatedly pasting variants of `NEXT_PROMPT.md` into fresh sessions to bootstrap the agent into the discipline. The cost was small per session but visible across the trajectory; meanwhile, Claude Code natively auto-loads `CLAUDE.md`, providing a zero-friction implementation channel that was unused. Recognising the same property exists in other harnesses generalised the pattern away from being Claude-specific.
+
+This amendment is consistent with the v0.2 framing: the *governance* (warm-up sequence, stable IDs, ADR discipline) is unchanged; the *execution surface* gains a new lowest-friction entry point. As agentic memory tooling matures (per OQ-028), bootstrap files remain the durable fallback for environments where richer tooling is unavailable.
+
+### Cross-references
+
+- [ADR-042](../decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point) — codifying decision.
+- [ADR-026](../decisions/DECISIONS.md#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface) — agentic-execution stack this amendment extends at L0.
+- [`CONTEXT_PROTOCOL.md` §11.2](../../CONTEXT_PROTOCOL.md) — L0 specification (amended).
+- [`CLAUDE.md`](../../CLAUDE.md) — first instance.
+- [OQ-028](../decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1) — open question on richer-L0 tooling; bootstrap files do not displace this work.
+- [OQ-029](../decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1) — open question on richer-L0 timing.
+
+**Status:** ACCEPTED 2026-05-02; first instance (`CLAUDE.md`) lands in the same commit batch as this amendment.
+
+---

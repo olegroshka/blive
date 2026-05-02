@@ -4,7 +4,7 @@
 >
 > **Audience:** any agent (Claude or other) and any human contributor working on `blive`. This file is mandatory reading before the first edit of a session.
 >
-> **Status:** v0.1 DRAFT.
+> **Status:** v0.4 DRAFT.
 >
 > **Companion files:**
 > - [`REQUIREMENTS.md`](./REQUIREMENTS.md) — what we're building.
@@ -589,6 +589,8 @@ The default posture: **agent proposes; human approves**. The human's residual su
 ### 11.2 The five-layer adoption stack
 
 **L0 — Substrate-aware warm-up.** An agent reads `CONTEXT_INVENTORY.md`, takes a task description, walks the `depends_on` closure of relevant artefacts, and pages them into working context. Replaces manual file-list curation in `NEXT_PROMPT.md`. Layer-independent — useful even if no other layer is implemented.
+
+The simplest manual implementation of L0 is a **session-bootstrap file** at the project root: a small markdown pointer that any agent harness loads automatically at session start (per its native convention — `CLAUDE.md` for Claude Code; `AGENTS.md`, `.cursorrules`, or system-prompt config for others). The bootstrap file is itself substrate (frontmatter, version, `referenced_by`) and is governed by the same edit protocol; its content is *pointers* to the canonical substrate, never restated rules. The pattern is **agent-agnostic in semantics, platform-specific in filename** — the discipline does not couple to any single AI vendor or model generation. See [ADR-042](docs/decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point). When fuller L0 tooling lands (per [OQ-028](docs/decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1) and [OQ-029](docs/decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1)), the bootstrap file becomes the fallback for environments without it; the pattern is durable across the L0 → L1 → L4 transitions.
 
 **L1 — Continuous integrity watchdog.** A second-class agent runs scheduled scans for: orphan stable-id references; STABLE artefacts past freshness window; glossary divergence (same term used with different semantics across artefacts — detectable via embedding similarity); supersede-chain cycles; FSM-vs-code drift in INV-13. Produces a drift report for human review. Catches §7's drift modes proactively rather than at next freeze gate.
 

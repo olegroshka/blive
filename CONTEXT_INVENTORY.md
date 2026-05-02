@@ -2,7 +2,7 @@
 
 > **Purpose:** the canonical map of every knowledge artifact this project depends on. Any agent (Claude, contributor, future-self) reading this file should understand *what we know, where it lives, and what's missing* in under 10 minutes.
 >
-> **Status:** v0.7 DRAFT — M2-IG bridge close at architectural surface (RETRO-M2-IG STABLE; M2-IG.5 strategy run + production Lightstreamer wrapper deferred). M2-IB resumption is now the active path (IB Paper account commissioned 2026-04-28; enabled 2026-04-29). Will be edited every time an artifact is added, retired, or moved.
+> **Status:** v0.8 DRAFT — methodology-amendment batch 2026-05-02 added Layer 0. Bootstrap (`CLAUDE.md`) per [ADR-042](./docs/decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point); CONTEXT_PROTOCOL §11.2 extended with session-bootstrap-file paragraph; Amendments_Log v0.3 recorded. Prior v0.7 baseline: M2-IG bridge close at architectural surface (RETRO-M2-IG STABLE; M2-IG.5 strategy run + production Lightstreamer wrapper deferred); M2-IB resumption active (IB Paper account commissioned 2026-04-28; enabled 2026-04-29). Will be edited every time an artifact is added, retired, or moved.
 >
 > **Maintainer:** Oleg + Claude.
 >
@@ -53,8 +53,9 @@ This file is the index of all of those. It does not contain the knowledge itself
 
 | Layer | Artifact | Status | Lifecycle | Purpose |
 |-------|----------|--------|-----------|---------|
-| 0. Process | [`CONTEXT_PROTOCOL.md`](./CONTEXT_PROTOCOL.md) | DRAFT v0.3 (2026-04-26) | rare amendments, iterative until v1 | the discipline that keeps every other artifact coherent. v0.2 amended §8.3 with milestone-close (8.3.1) and phase-boundary (8.3.2) rules per [ADR-025](./docs/decisions/DECISIONS.md#adr-025--amend-context_protocol-83-with-milestone-close-and-phase-boundary-rules). v0.3 added §11 (Human-governance / agent-execution division of labour with five-layer adoption stack) per [ADR-026](./docs/decisions/DECISIONS.md#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface); existing §11 Self-Critique renumbered to §12 |
+| 0. Process | [`CONTEXT_PROTOCOL.md`](./CONTEXT_PROTOCOL.md) | DRAFT v0.4 (2026-05-02) | rare amendments, iterative until v1 | the discipline that keeps every other artifact coherent. v0.2 amended §8.3 with milestone-close (8.3.1) and phase-boundary (8.3.2) rules per [ADR-025](./docs/decisions/DECISIONS.md#adr-025--amend-context_protocol-83-with-milestone-close-and-phase-boundary-rules). v0.3 added §11 (Human-governance / agent-execution division of labour with five-layer adoption stack) per [ADR-026](./docs/decisions/DECISIONS.md#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface); existing §11 Self-Critique renumbered to §12. v0.4 extended §11.2 with the session-bootstrap-file paragraph (manual L0 baseline) per [ADR-042](./docs/decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point) |
 | 0. Index | **this file** (`CONTEXT_INVENTORY.md`) | DRAFT v0.2 (2026-04-26) | continuous | the registry of all artifacts |
+| 0. Bootstrap | [`CLAUDE.md`](./CLAUDE.md) | STABLE v1.0 (2026-05-02) | rare amendments, mirrors CONTEXT_PROTOCOL §8.1 / §11.2 | session-bootstrap pointer for AI agent harnesses (Claude Code instance of the agent-agnostic pattern in [ADR-042](./docs/decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point)); the manual L0 baseline of the agentic-execution stack per [CONTEXT_PROTOCOL §11.2](./CONTEXT_PROTOCOL.md). Pointer file only — never restates the discipline; SSOT remains CONTEXT_PROTOCOL |
 | 1. Vision | (top of `README.md`, future) | MISSING | rare | one paragraph: why blive exists |
 | 2. Requirements | [`REQUIREMENTS.md`](./REQUIREMENTS.md) | DRAFT v0.1 | iterative until M0 frozen | what we will build |
 | 3. Design | `DESIGN.md` | MISSING | iterative through M2 | how it is shaped (component, sequence, state diagrams) |
@@ -224,7 +225,7 @@ blive/
   DESIGN.md                                  ← future (post-REQUIREMENTS freeze)
   TASK_REGISTRY.md                           ← future
   RUNBOOK.md                                 ← future
-  CLAUDE.md                                  ← project instructions for Claude (small, points here)
+  CLAUDE.md                                  ← STABLE v1.0; session-bootstrap pointer per ADR-042
   docs/
     GLOSSARY.md                              ← KB-12
     kb/

@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-05-01
-version: 0.12
+last_reviewed: 2026-05-02
+version: 0.13
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -69,6 +69,7 @@ referenced_by:
 | [ADR-037](#adr-037--instrumenttradability-field-spot--cfd--spread_bet) | `Instrument.tradability` field (spot / cfd / spread_bet) | ACCEPTED | 2026-04-27 | — |
 | [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) | IG rate-limit defaults (parameterise ADR-031) | ACCEPTED | 2026-04-27 | — |
 | [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | ACCEPTED | 2026-04-27 | — |
+| [ADR-042](#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point) | Session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point | ACCEPTED | 2026-05-02 | — |
 
 ---
 
@@ -1837,6 +1838,64 @@ The translation lives **only** in the IB resolver. The broker-neutral `Instrumen
 
 ---
 
+## ADR-042 — Session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point
+
+- **status:** ACCEPTED
+- **date:** 2026-05-02
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **extends:** [ADR-026](#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface)
+
+### Context
+
+[CONTEXT_PROTOCOL §8.1](../../CONTEXT_PROTOCOL.md) requires every session to begin with a warm-up read of the substrate. In practice this requires the operator to tell a fresh agent where to start every session — paste [`NEXT_PROMPT.md`](../../NEXT_PROMPT.md) or a reading list into the first message, or remind the agent to read [`CONTEXT_INVENTORY.md`](../../CONTEXT_INVENTORY.md) before editing. The friction is small per session but compounds: across many sessions and contributors it is a vector for skipped warm-up and for the drift modes the discipline catalogues in [CONTEXT_PROTOCOL §1](../../CONTEXT_PROTOCOL.md).
+
+[ADR-026](#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface) codified the agentic-execution stack (L0–L4). L0 — substrate-aware warm-up — was specified as "an agent that reads `CONTEXT_INVENTORY.md` and walks the `depends_on` closure". The simplest, ahead-of-tooling implementation of L0 is a static **session-bootstrap file**: a small markdown file at the project root that any agent harness loads automatically at session start (per its native config convention) and that points at the canonical substrate.
+
+Most modern AI coding harnesses already load such a file. Claude Code reads `CLAUDE.md`; other harnesses use `AGENTS.md`, `.cursorrules`, system-prompt config, or analogous mechanisms. The discipline-relevant fact is that *the file exists and reliably loads* — the specific filename is a per-agent convention.
+
+### Decision
+
+Adopt **session-bootstrap files** as the canonical L0 implementation under the agentic-execution stack. The pattern is **agent-agnostic in semantics, platform-specific in filename**:
+
+1. The project root contains one or more small bootstrap files, each tailored to a specific agent platform's loading convention.
+2. Every bootstrap file is a *pointer* to the canonical substrate (CONTEXT_PROTOCOL, CONTEXT_INVENTORY, REQUIREMENTS, TASK_REGISTRY, NEXT_PROMPT, methodology paper) — not a copy. SSOT ([CONTEXT_PROTOCOL §2.1](../../CONTEXT_PROTOCOL.md)) applies; the protocol remains the single source of truth and bootstrap files drift back to it on review.
+3. Bootstrap files articulate the **mandatory warm-up sequence** (per [CONTEXT_PROTOCOL §8.1](../../CONTEXT_PROTOCOL.md)), the **discipline at-a-glance** (stable IDs, ADR-mandatory choices, status lifecycle, anti-patterns), and **operator-action conventions** (when to ask vs. act).
+4. Bootstrap files are versioned substrate artefacts subject to the edit protocol — frontmatter (`id`, `status`, `last_reviewed`, `version`, `depends_on`, `referenced_by`) is mandatory; `last_reviewed` bumps on every edit; commits list bootstrap files by stable id like any other artefact.
+
+**Initial instance:** [`CLAUDE.md`](../../CLAUDE.md) at the repo root (Claude Code's auto-loaded project file). Future agent-specific instances (e.g. `AGENTS.md`, `.cursorrules`) are added as they are needed; each is a thin agent-specific shim around the same pointer set.
+
+### Alternatives Considered
+
+1. **Rely on operator to paste NEXT_PROMPT each session.** Current state. Friction; vector for skipped warm-up; doesn't survive contributor handoff or fresh-agent-instance.
+2. **Pre-prompt hook** (e.g. `UserPromptSubmit` injecting a reminder). Noisy; user-machine-specific (lives in `~/.claude/settings.json`, not in repo); less durable than a repo-committed file.
+3. **Restate the discipline in the bootstrap file** rather than pointing at it. Violates SSOT; the bootstrap would drift from CONTEXT_PROTOCOL and become a second-source-of-truth that contradicts the first.
+4. **Single agent-agnostic file (`AGENTS.md` only).** Plausible, but each platform has its own loading convention; one-file-fits-all loses zero-config auto-load on platforms whose convention differs. Each platform getting a thin shim is cheaper than fighting the harness.
+5. **Hardcode a richer L0 agent now** (per [OQ-028](OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1)). Premature; OQ-028 / OQ-029 explicitly defer richer L0 tooling, and a static bootstrap file is the durable fallback regardless of which framework that work eventually picks.
+
+### Consequences
+
+- **Positive:** Warm-up becomes near-zero-friction on supported harnesses; the agent self-initialises into the discipline. New contributors and new agent platforms onboard by reading one short file. The pattern compounds with existing memory / agentic frameworks: as L0+ tooling matures, the bootstrap file becomes the fallback for environments where richer tooling is unavailable.
+- **Positive:** Agent-agnostic framing means the discipline does not couple to any single AI vendor or model generation. The methodology endures across model swaps and platform churn.
+- **Negative / risks:** Bootstrap file content can drift from CONTEXT_PROTOCOL if amendments to the protocol don't propagate. **Mitigation:** explicit `depends_on` from the bootstrap file; review at every milestone freeze ([CONTEXT_PROTOCOL §6.4](../../CONTEXT_PROTOCOL.md)); bootstrap files are pointers, never restatements, so drift surface is minimal by construction.
+- **Follow-ups:**
+  - Add a `0. Bootstrap` row to [CONTEXT_INVENTORY §1](../../CONTEXT_INVENTORY.md#1-representation-hierarchy) (this batch).
+  - Amend [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) to identify the bootstrap-file pattern as the manual L0 baseline (this batch).
+  - Add Amendment v0.3 entry in [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) with paper-section guidance for the next iteration of `cognitive_cartography.tex` (this batch).
+  - When a second agent platform comes into regular use (e.g. an `AGENTS.md` becomes desirable), add the second instance without re-litigating the pattern.
+
+### Cross-References
+
+- [CONTEXT_PROTOCOL §8.1](../../CONTEXT_PROTOCOL.md) — warm-up sequence the bootstrap files operationalise.
+- [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) — L0 specification, of which session-bootstrap is the manual baseline.
+- [ADR-024](#adr-024--add-session-retrospective-artefact-type) — comparable artefact-type-introducing ADR.
+- [ADR-025](#adr-025--amend-context_protocol-83-with-milestone-close-and-phase-boundary-rules) — comparable protocol-amending ADR.
+- [ADR-026](#adr-026--adopt-agentic-execution-layer-reduce-human-action-surface) — agentic-execution stack this ADR extends at L0.
+- [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) Amendment v0.3 — methodology-paper amendment record.
+- [OQ-028](OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1), [OQ-029](OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1) — open questions on richer-L0 tooling that bootstrap files do not displace.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1851,3 +1910,4 @@ The translation lives **only** in the IB resolver. The broker-neutral `Instrumen
 - **v0.10 (2026-04-28)** — M2-IB.2 milestone flip. ADR-031 (token-bucket rate limiter shape for IB adapters) PROPOSED → ACCEPTED: the algorithm shipped at M2-IG.2 inside `blive.adapters.shared.rate_limiter` and the IB-specific defaults table now lives at `blive.adapters.ib.rate_limiter.IB_DEFAULT_RATE_LIMITS` (`global` 20/s, `historical` 50/600s per [KB-3 §9](../kb/ib_pacing_spec.md#9-summary-adapter-budget-defaults)). `IBClient.connect()` exercises the limiter via `acquire("global")` per the M2-IB.2 unit-test suite. Body of ADR-031 unchanged (append-only); status field flipped + a parenthetical PROPOSED→ACCEPTED date trail added in the ADR header. **ADR-032 stays PROPOSED** until M2-IB.3 IBInstrumentResolver exercises `qualifyContractsAsync` against IB Paper.
 - **v0.11 (2026-04-28)** — M2-IB.3 prereq closure. Added ADR-040 (Phase 1 deployment target: Windows host with native IB Gateway; no Docker / IBC for paper-mode dev; Linux VM revisited at M8 production cutover). Drafted PROPOSED, accepted same-session per the established same-day-ACCEPTED pattern; status flipped to ACCEPTED. Closes the "Decide deployment target" item from [TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md). Daily 23:45 ET TWS-restart handled by operator-managed manual relogin during the M2-IB.5 ≥5-trading-day run; blive's reconciliation handles the disconnect/reconnect transient unchanged.
 - **v0.12 (2026-05-01)** — M2-IB.3a-resolved milestone flips. ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`) PROPOSED → ACCEPTED: `IBInstrumentResolver` exercised against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` 2026-05-01) and resolved Phase 1 instrument cleanly (`CAC.PA` → `conId=11183823`). Body of ADR-032 unchanged (append-only); status field flipped + PROPOSED→ACCEPTED date trail added in the ADR header. Added ADR-041 (Yahoo-suffix translation in IB instrument resolver) — drafted PROPOSED then ACCEPTED in same commit per established same-day-ACCEPTED pattern; refines ADR-032 with the EODHD/Yahoo `.PA` suffix-stripping rule discovered when the first probe attempt failed with IB error 200 on `CAC.PA`. Yahoo-suffix table seeded for `XPAR/.PA`, `XLON/.L`, `XETR/.DE`, `XAMS/.AS`. The broker-neutral `Instrument` keeps its EODHD-friendly form per ADR-004; only the IB resolver translates. **All ADRs accepted as of v0.12**: ADR-001..041 ACCEPTED. No PROPOSED ADRs remain.
+- **v0.13 (2026-05-02)** — methodology-amendment batch. Added ADR-042 (session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point) — drafted PROPOSED then ACCEPTED same-session per established pattern; extends ADR-026 by operationalising the L0 layer with a static manual-baseline implementation (a project-root markdown file the harness auto-loads). First instance lands as [`CLAUDE.md`](../../CLAUDE.md). Companion edits in this batch: [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) extended to identify the bootstrap-file pattern as the manual L0 baseline; [CONTEXT_INVENTORY §1](../../CONTEXT_INVENTORY.md) gains a "0. Bootstrap" row for `CLAUDE.md` and §7 file-layout updated; [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) Amendment v0.3 records paper-section guidance for the next iteration of `cognitive_cartography.tex`. **All ADRs accepted as of v0.13**: ADR-001..042 ACCEPTED. (Note: ADR-040 + ADR-041 were the most-recent prior IDs; ADR-042 is the next monotonic id.)
