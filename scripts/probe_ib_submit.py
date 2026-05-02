@@ -1,46 +1,54 @@
 """IB write-side smoke test.
 
-Submits a tiny LMT BUY for 1 share of CAC.PA at €1.00 (well below
-market — won't fill in normal conditions), waits for SUBMITTED +
-(ACCEPTED or REJECTED), then cancels (only if ACCEPTED was observed).
+Submits a tiny LMT BUY for 1 share of AAPL on SMART/NASDAQ at $1.00
+(well below market — won't fill in normal conditions), waits for
+SUBMITTED + (ACCEPTED or REJECTED), then cancels (only if ACCEPTED was
+observed).
 
 Validates the M2-IB.4a write-side wiring end-to-end against IB Paper:
 
 - ``ib.placeOrder`` round-trip (1 ``global`` rate-limit token).
 - Per-trade ``statusEvent`` handler emits ACCEPTED on IB ``Submitted``.
+- ``ib.cancelOrder`` round-trip (1 ``global`` token), exercised when
+  the order reaches ACCEPTED rather than REJECTED.
+- Per-trade ``statusEvent`` handler emits CANCELED on IB ``Cancelled``
+  (M2-IB.4a-happy path, validated 2026-05-02 with this AAPL/SMART
+  default).
 - Per-trade ``statusEvent`` handler emits REJECTED on IB ``Cancelled``
   with a non-zero ``errorCode`` in the trade log (the disambiguation
   path; see ``_last_error_log_entry`` / ``_rejected_reason_from_log_entry``
-  helpers in ``src/blive/adapters/ib/broker.py``).
-- ``ib.cancelOrder`` round-trip (1 ``global`` token), exercised when
-  the order reaches ACCEPTED rather than REJECTED.
-- Per-trade ``statusEvent`` handler emits CANCELED on IB ``Cancelled``.
+  helpers in ``src/blive/adapters/ib/broker.py``). Exercise this branch
+  by switching ``_TEST_INSTRUMENT`` to ``_PHASE_1_INSTRUMENT`` (CAC.PA
+  on XPAR/SBF, direct-routed) — IB Paper's account-level direct-routing
+  restriction (error 10311) blocks the order and the broker emits
+  REJECTED with reason ``"ib:10311 ..."``.
 
 Two terminal outcomes count as success (exit 0):
 
 1. ``SUBMITTED → ACCEPTED → CANCELED`` (happy path; user cancel after
-   acceptance).
-2. ``SUBMITTED → REJECTED`` (system rejection; common reasons include
-   IB's direct-routing precaution at error 10311 against orders routed
-   to non-SMART venues like SBF). The disambiguation logic in
-   ``IBBroker._on_order_status`` translates IB's ``Cancelled`` status +
-   non-zero ``errorCode`` into a REJECTED FSM event with an
-   ``"ib:{code} {message}"`` reason, satisfying INV-13 §5 + INV-14.
+   acceptance) — the default with AAPL/SMART.
+2. ``SUBMITTED → REJECTED`` (system rejection; e.g. IB's direct-routing
+   restriction at error 10311 against orders routed to non-SMART venues
+   like SBF). The disambiguation logic in ``IBBroker._on_order_status``
+   translates IB's ``Cancelled`` status + non-zero ``errorCode`` into a
+   REJECTED FSM event with an ``"ib:{code} {message}"`` reason,
+   satisfying INV-13 §5 + INV-14.
 
-Prerequisites: same as other probes (Gateway / TWS running with the API
-exposed on the configured port, ``~/.blive/secrets/ib.env`` populated)
-**plus** the IB-side "Read-Only API" toggle must be unchecked
-(Configuration → API → Settings — applies identically to TWS and IB
-Gateway). With Read-Only API set, IB returns an error on placeOrder
-(typically "API order placement is disabled" or a specific reject code)
-and this probe FAILS on submit; that's the diagnostic and the script
-prints a hint pointing at the toggle.
+Prerequisites: Gateway running with the API exposed on the configured
+port, ``~/.blive/secrets/ib.env`` populated, and the IB-side "Read-Only
+API" toggle unchecked (Configuration → API → Settings). With Read-Only
+API set, IB returns an error on placeOrder (typically "API order
+placement is disabled" or a specific reject code) and this probe FAILS
+on submit; that's the diagnostic.
 
-To exercise the happy path (outcome 1) rather than the precaution-
-rejection path (outcome 2), the operator may also need to allow
-direct-routed orders via TWS Configuration → API → **Precautions**
-(otherwise IB intercepts orders to SBF / other direct-routed venues
-with error 10311 → REJECTED).
+Note on IB Paper's direct-routing restriction: the ``API → Precautions``
+bypass checkboxes (item #1 master bypass and item #7 Redirect Order)
+**do not** override error 10311 — it's a hard account-level restriction,
+not a configurable warning. The probe therefore uses SMART routing for
+US equities (``_SmartUsResolver`` below) to validate the happy path
+without depending on operator-side IB account changes. Phase 1 / M2-IB.5
+(CAC.PA on SBF) hits the same restriction; resolution paths are tracked
+in INV-14 §"Open Questions".
 
 Run:
 
@@ -56,6 +64,8 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
+
+import ib_async
 
 from blive.adapters.clock.wall import WallClock
 from blive.adapters.ib import (
@@ -80,6 +90,52 @@ from blive.domain.types import (
     TimeInForce,
 )
 
+# --- Probe-local SMART-routing resolver for US equities ---------------------
+#
+# The production resolver (DD-7 §3) maps US equity venue MICs (XNAS, XNYS,
+# ARCX, BATS) directly to IB's named exchanges (NASDAQ, NYSE, ARCA, BATS).
+# IB Paper's account-level "Direct Routed Orders" restriction (error 10311)
+# blocks any non-SMART order regardless of the API → Precautions bypass
+# checkbox state — it's a hard restriction, not a configurable warning.
+#
+# IB's recommended pattern for US equities is SMART routing with the
+# primary listing exchange as a hint (`exchange="SMART"`,
+# `primaryExchange="NASDAQ"`). This both avoids the precaution and
+# matches production best practice. A formal codification of this in the
+# main resolver is OQ-territory (a future ADR + DD-7 amendment); this
+# subclass is the probe-local minimal extension for M2-IB.4a-happy
+# wire validation.
+
+_US_MIC_TO_PRIMARY_EXCHANGE: dict[str, str] = {
+    "XNAS": "NASDAQ",
+    "XNYS": "NYSE",
+    "ARCX": "ARCA",
+    "BATS": "BATS",
+}
+
+
+class _SmartUsResolver(IBInstrumentResolver):
+    """Probe-only :class:`IBInstrumentResolver` that uses SMART routing for
+    US-venue spot equities, falling back to the parent's direct-routing
+    behaviour for everything else (incl. Phase 1's CAC.PA on XPAR).
+    """
+
+    def to_contract(self, instrument: Instrument) -> ib_async.Contract:
+        primary = _US_MIC_TO_PRIMARY_EXCHANGE.get(instrument.venue)
+        if (
+            primary is not None
+            and instrument.tradability == "spot"
+            and instrument.asset_class in (AssetClass.EQUITY, AssetClass.ETF)
+        ):
+            return ib_async.Contract(
+                symbol=instrument.symbol,
+                secType="STK",
+                currency=instrument.currency,
+                exchange="SMART",
+                primaryExchange=primary,
+            )
+        return super().to_contract(instrument)
+
 
 def _print_header(title: str) -> None:
     print()
@@ -91,13 +147,31 @@ def _print_step(label: str, detail: str = "") -> None:
     print(f"  - {label}{suffix}")
 
 
-# Phase 1 instrument per ADR-021. Note: order placement does NOT require a
-# market-data subscription; the order routes via SBF regardless.
+# Phase 1 canonical instrument per ADR-021 (XPAR direct-routed via the
+# default resolver). Available as an alternative test path; left here for
+# documentation. Routing CAC.PA through IB Paper trips the account-level
+# "Direct Routed Orders" restriction (error 10311) — used by the prior
+# probe runs to validate the REJECTED-via-disambiguation FSM transition.
 _PHASE_1_INSTRUMENT = Instrument(
     symbol="CAC.PA",
     venue="XPAR",
     currency="EUR",
     asset_class=AssetClass.ETF,
+    multiplier=Decimal("1"),
+    tradability="spot",
+)
+
+
+# Test instrument for the happy-path validation: AAPL on the US SMART
+# router. Combined with `_SmartUsResolver` above, this routes via
+# `exchange="SMART"` + `primaryExchange="NASDAQ"`, sidestepping the
+# direct-routing restriction. Liquid + 24h paper data → easy non-fillable
+# LMT @ $1 for the wire test.
+_TEST_INSTRUMENT = Instrument(
+    symbol="AAPL",
+    venue="XNAS",
+    currency="USD",
+    asset_class=AssetClass.EQUITY,
     multiplier=Decimal("1"),
     tradability="spot",
 )
@@ -163,7 +237,10 @@ async def _run_probe() -> int:
     clock = WallClock()
     rate_limiter = TokenBucketRateLimiter(config=IB_DEFAULT_RATE_LIMITS, clock=clock)
     client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock)
-    resolver = IBInstrumentResolver(client)
+    # Probe-local resolver: SMART routing for US equities (avoids IB Paper's
+    # direct-routing restriction at error 10311); falls back to the default
+    # direct-routing behaviour for non-US venues.
+    resolver = _SmartUsResolver(client)
     broker = IBBroker(client=client, resolver=resolver, clock=clock)
 
     _print_step("connecting to IB Paper Gateway")
@@ -177,14 +254,14 @@ async def _run_probe() -> int:
     # Drain the connect ConnectionStatus from the broker's queue directly.
     await asyncio.wait_for(broker._events.get(), timeout=2.0)  # noqa: SLF001
 
-    # Build a tiny LMT BUY at €1 (well below CAC.PA market ~€78). This
+    # Build a tiny LMT BUY at $1 (well below AAPL market ~$200+). This
     # order won't fill in normal market conditions — perfect for FSM
     # validation: SUBMITTED → ACCEPTED → cancel → CANCELED.
     cid = ClientOrderId(uuid4())
     order = Order(
         client_order_id=cid,
         strategy_id="probe",
-        instrument=_PHASE_1_INSTRUMENT,
+        instrument=_TEST_INSTRUMENT,
         side=OrderSide.BUY,
         quantity=Decimal("1"),
         order_type=OrderType.LMT,
@@ -197,8 +274,9 @@ async def _run_probe() -> int:
     )
 
     _print_step(
-        "submitting LMT BUY 1 CAC.PA @ EUR 1.00",
-        f"client_order_id={str(cid)[:8]}...",
+        f"submitting LMT BUY {order.quantity} {order.instrument.symbol} @ "
+        f"{order.instrument.currency} {order.limit_price}",
+        f"client_order_id={str(cid)[:8]}... (SMART/{_US_MIC_TO_PRIMARY_EXCHANGE.get(order.instrument.venue, order.instrument.venue)})",
     )
     try:
         await broker.submit(order)
