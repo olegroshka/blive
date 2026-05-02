@@ -53,9 +53,16 @@ _ASSET_CLASS_TO_SEC_TYPE: Mapping[AssetClass, str] = {
 
 # --- DD-7 §3: venue (MIC) → IB exchange -------------------------------------
 
-# Phase 1 needs only XPAR → SBF. Future Phase 2/3 / post-M8 venues add rows.
-# Keep this table internal — adapters import it via constants module if /
-# when other modules need to reuse the mapping.
+# For *direct-routed* venues (XPAR, XLON, XETR), the value is the IB
+# `Contract.exchange` field directly. For *SMART-routed* US-equity venues
+# (XNAS, XNYS, ARCX, BATS — see :data:`_US_SMART_VENUES` below), the value
+# is the IB-named exchange used as the `primaryExchange` hint, and the
+# `Contract.exchange` field is set to ``"SMART"`` per [ADR-046](../../../../docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032).
+#
+# Phase 1 needs XPAR (CAC.PA, substrate) + XNAS (TQQQ, IEF) + XNYS (TMF)
+# per [ADR-043](../../../../docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2).
+# Future venues add rows. Keep this table internal — adapters import it
+# via constants module if / when other modules need to reuse the mapping.
 _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
     "XPAR": "SBF",
     "XNAS": "NASDAQ",
@@ -65,6 +72,29 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
     "XLON": "LSE",
     "XETR": "IBIS",
 }
+
+
+# US-equity venues that route via SMART per [ADR-046](../../../../docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032).
+# When ``instrument.venue`` is in this set AND
+# ``instrument.tradability == "spot"`` AND ``instrument.asset_class`` is
+# ``EQUITY`` or ``ETF``, :meth:`IBInstrumentResolver.to_contract`
+# constructs a ``Contract`` with ``exchange="SMART"`` and the
+# ``primaryExchange`` hint from :data:`_MIC_TO_IB_EXCHANGE`. This both
+# avoids IB Paper's "Direct Routed Orders" precaution at error 10311
+# (observed at `M2-IB.4a-rejected`) and matches IB's recommended
+# best practice for US equities.
+#
+# Non-US venues retain direct routing — SMART support varies by venue
+# and revisits per venue (XLON / XETR direct routing per DD-7 §3).
+_US_SMART_VENUES: frozenset[str] = frozenset({"XNAS", "XNYS", "ARCX", "BATS"})
+
+
+# Asset classes that participate in the SMART convention. Options /
+# futures grow their own routing table when those asset classes land
+# (per DD-7 §3 SMART discriminator note).
+_SMART_ELIGIBLE_ASSET_CLASSES: frozenset[AssetClass] = frozenset(
+    {AssetClass.EQUITY, AssetClass.ETF}
+)
 
 
 # --- DD-7 §3.1: Yahoo Finance / EODHD exchange-suffix → MIC -----------------
@@ -183,12 +213,28 @@ class IBInstrumentResolver:
                 f"_ASSET_CLASS_TO_SEC_TYPE or DD-7 §2."
             )
 
-        exchange = _MIC_TO_IB_EXCHANGE.get(instrument.venue)
-        if exchange is None:
+        ib_exchange_value = _MIC_TO_IB_EXCHANGE.get(instrument.venue)
+        if ib_exchange_value is None:
             raise InstrumentNotResolvable(
                 f"IB resolver has no exchange mapping for MIC venue="
                 f"{instrument.venue!r}; extend _MIC_TO_IB_EXCHANGE or DD-7 §3."
             )
+
+        # SMART-routing discriminator per [ADR-046](../../../../docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032)
+        # + DD-7 §3: applies when venue ∈ US-SMART set AND tradability="spot"
+        # AND asset_class ∈ {EQUITY, ETF}. For SMART-routed venues, the
+        # _MIC_TO_IB_EXCHANGE value is the primaryExchange hint and the
+        # Contract.exchange is "SMART"; otherwise it's the routing exchange
+        # directly.
+        if (
+            instrument.venue in _US_SMART_VENUES
+            and instrument.asset_class in _SMART_ELIGIBLE_ASSET_CLASSES
+        ):
+            exchange = "SMART"
+            primary_exchange = ib_exchange_value
+        else:
+            exchange = ib_exchange_value
+            primary_exchange = ""  # IB convention: empty string when not SMART-routed.
 
         # multiplier: empty string for STK / IND / CASH (DD-7 §1); the
         # actual multiplier value for OPT / FUT.
@@ -199,6 +245,7 @@ class IBInstrumentResolver:
             secType=sec_type,
             currency=instrument.currency,
             exchange=exchange,
+            primaryExchange=primary_exchange,
             multiplier=multiplier_str,
         )
 

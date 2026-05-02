@@ -132,7 +132,13 @@ def test_to_contract_equity_maps_to_stk(
     rate_limiter: TokenBucketRateLimiter,
     clock: SimClock,
 ) -> None:
-    """EQUITY → STK (same as ETF, IB doesn't distinguish at secType)."""
+    """EQUITY → STK (same as ETF, IB doesn't distinguish at secType).
+
+    AAPL on XNAS routes via SMART per ADR-046 (US-equity venues + spot +
+    EQUITY/ETF asset class → SMART with primaryExchange hint). The
+    Contract.exchange is "SMART"; the IB-named exchange "NASDAQ" carries
+    on the primaryExchange field.
+    """
     resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
     instrument = Instrument(
         symbol="AAPL",
@@ -143,7 +149,125 @@ def test_to_contract_equity_maps_to_stk(
     )
     contract = resolver.to_contract(instrument)
     assert contract.secType == "STK"
+    assert contract.exchange == "SMART"
+    assert contract.primaryExchange == "NASDAQ"
+
+
+def test_to_contract_us_etf_xnas_routes_via_smart_nasdaq(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ETF on XNAS routes via SMART/NASDAQ per ADR-046. Phase 1 path:
+    TQQQ (3× QQQ) on NASDAQ via SMART avoids IB Paper's direct-routing
+    precaution at error 10311 without operator-side bypass."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="TQQQ",
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.secType == "STK"
+    assert contract.exchange == "SMART"
+    assert contract.primaryExchange == "NASDAQ"
+
+
+def test_to_contract_us_etf_xnys_routes_via_smart_nyse(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ETF on XNYS routes via SMART/NYSE per ADR-046."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="TMF",
+        venue="XNYS",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.exchange == "SMART"
+    assert contract.primaryExchange == "NYSE"
+
+
+def test_to_contract_us_etf_arcx_routes_via_smart_arca(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ETF on ARCX routes via SMART/ARCA per ADR-046."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="SPY",
+        venue="ARCX",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.exchange == "SMART"
+    assert contract.primaryExchange == "ARCA"
+
+
+def test_to_contract_us_etf_bats_routes_via_smart_bats(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ETF on BATS routes via SMART/BATS per ADR-046."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="VOO",
+        venue="BATS",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.exchange == "SMART"
+    assert contract.primaryExchange == "BATS"
+
+
+def test_to_contract_non_us_venue_retains_direct_routing(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+    cac_pa: Instrument,
+) -> None:
+    """Non-US venues (XPAR / XLON / XETR) retain direct routing per ADR-046:
+    SMART support varies by venue and is revisited per venue when those
+    return to scope. CAC.PA on XPAR stays direct-routed to SBF;
+    primaryExchange is empty (IB convention for non-SMART contracts)."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    contract = resolver.to_contract(cac_pa)
+    assert contract.exchange == "SBF"
+    assert contract.primaryExchange == ""
+
+
+def test_to_contract_us_index_does_not_use_smart(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """INDEX on a US venue is *not* routed via SMART — the SMART convention
+    per ADR-046 applies only to spot EQUITY / ETF asset classes. INDEX is
+    used for parity-residual decomposition reads, not orders."""
+    resolver = _make_resolver(credentials, rate_limiter, clock, _make_mock_ib())
+    instrument = Instrument(
+        symbol="SPX",
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.INDEX,
+        multiplier=Decimal("1"),
+    )
+    contract = resolver.to_contract(instrument)
+    assert contract.secType == "IND"
     assert contract.exchange == "NASDAQ"
+    assert contract.primaryExchange == ""
 
 
 def test_to_contract_index_maps_to_ind(

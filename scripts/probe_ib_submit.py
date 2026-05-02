@@ -51,14 +51,16 @@ API set, IB returns an error on placeOrder (typically "API order
 placement is disabled" or a specific reject code) and this probe FAILS
 on submit; that's the diagnostic.
 
-Note on IB Paper's direct-routing restriction: the ``API → Precautions``
-bypass checkboxes (item #1 master bypass and item #7 Redirect Order)
-**do not** override error 10311 — it's a hard account-level restriction,
-not a configurable warning. The probe therefore uses SMART routing for
-US equities (``_SmartUsResolver`` below) to validate the happy path
-without depending on operator-side IB account changes. Phase 1 / M2-IB.5
-(CAC.PA on SBF) hits the same restriction; resolution paths are tracked
-in INV-14 §"Open Questions".
+Note on IB Paper's direct-routing precaution at error 10311: per [ADR-046](../docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032),
+US-equity venues (XNAS / XNYS / ARCX / BATS) now route via SMART with a
+primaryExchange hint at the production :class:`IBInstrumentResolver` level
+— this avoids the precaution natively. The CAC.PA / SBF path still
+direct-routes (SMART support varies by venue for European cash equities)
+and depends on operator-side API → Precautions item #1 ("Bypass Order
+Precautions for API Orders") being ticked; observed at
+``M2-IB.4a-happy-cacpa``. Earlier probe iterations carried a probe-local
+``_SmartUsResolver`` workaround which ADR-046 codifies into the production
+resolver; the workaround was removed when production caught up.
 
 Run:
 
@@ -74,8 +76,6 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
-
-import ib_async
 
 from blive.adapters.clock.wall import WallClock
 from blive.adapters.ib import (
@@ -99,52 +99,6 @@ from blive.domain.types import (
     OrderType,
     TimeInForce,
 )
-
-# --- Probe-local SMART-routing resolver for US equities ---------------------
-#
-# The production resolver (DD-7 §3) maps US equity venue MICs (XNAS, XNYS,
-# ARCX, BATS) directly to IB's named exchanges (NASDAQ, NYSE, ARCA, BATS).
-# IB Paper's account-level "Direct Routed Orders" restriction (error 10311)
-# blocks any non-SMART order regardless of the API → Precautions bypass
-# checkbox state — it's a hard restriction, not a configurable warning.
-#
-# IB's recommended pattern for US equities is SMART routing with the
-# primary listing exchange as a hint (`exchange="SMART"`,
-# `primaryExchange="NASDAQ"`). This both avoids the precaution and
-# matches production best practice. A formal codification of this in the
-# main resolver is OQ-territory (a future ADR + DD-7 amendment); this
-# subclass is the probe-local minimal extension for M2-IB.4a-happy
-# wire validation.
-
-_US_MIC_TO_PRIMARY_EXCHANGE: dict[str, str] = {
-    "XNAS": "NASDAQ",
-    "XNYS": "NYSE",
-    "ARCX": "ARCA",
-    "BATS": "BATS",
-}
-
-
-class _SmartUsResolver(IBInstrumentResolver):
-    """Probe-only :class:`IBInstrumentResolver` that uses SMART routing for
-    US-venue spot equities, falling back to the parent's direct-routing
-    behaviour for everything else (incl. Phase 1's CAC.PA on XPAR).
-    """
-
-    def to_contract(self, instrument: Instrument) -> ib_async.Contract:
-        primary = _US_MIC_TO_PRIMARY_EXCHANGE.get(instrument.venue)
-        if (
-            primary is not None
-            and instrument.tradability == "spot"
-            and instrument.asset_class in (AssetClass.EQUITY, AssetClass.ETF)
-        ):
-            return ib_async.Contract(
-                symbol=instrument.symbol,
-                secType="STK",
-                currency=instrument.currency,
-                exchange="SMART",
-                primaryExchange=primary,
-            )
-        return super().to_contract(instrument)
 
 
 def _print_header(title: str) -> None:
@@ -172,11 +126,12 @@ _PHASE_1_INSTRUMENT = Instrument(
 )
 
 
-# Test instrument for the happy-path validation: AAPL on the US SMART
-# router. Combined with `_SmartUsResolver` above, this routes via
-# `exchange="SMART"` + `primaryExchange="NASDAQ"`, sidestepping the
-# direct-routing restriction. Liquid + 24h paper data → easy non-fillable
-# LMT @ $1 for the wire test.
+# Test instrument for the happy-path validation: AAPL on XNAS. Per
+# ADR-046, the production :class:`IBInstrumentResolver` routes US-equity
+# spot tradables via SMART with the primaryExchange hint, so AAPL/XNAS
+# automatically becomes Contract(exchange="SMART", primaryExchange="NASDAQ")
+# without any probe-local resolver subclass. Liquid + 24h paper data →
+# easy non-fillable LMT @ $1 for the wire test.
 _TEST_INSTRUMENT = Instrument(
     symbol="AAPL",
     venue="XNAS",
@@ -247,10 +202,11 @@ async def _run_probe() -> int:
     clock = WallClock()
     rate_limiter = TokenBucketRateLimiter(config=IB_DEFAULT_RATE_LIMITS, clock=clock)
     client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock)
-    # Probe-local resolver: SMART routing for US equities (avoids IB Paper's
-    # direct-routing restriction at error 10311); falls back to the default
-    # direct-routing behaviour for non-US venues.
-    resolver = _SmartUsResolver(client)
+    # Production IBInstrumentResolver routes US-equity venues via SMART per
+    # ADR-046 (the probe-local _SmartUsResolver workaround was retired when
+    # the convention was codified). Non-US venues retain direct routing
+    # (CAC.PA / SBF) and depend on operator-side API → Precautions bypass.
+    resolver = IBInstrumentResolver(client)
     broker = IBBroker(client=client, resolver=resolver, clock=clock)
 
     _print_step("connecting to IB Paper Gateway")
@@ -286,7 +242,7 @@ async def _run_probe() -> int:
     _print_step(
         f"submitting LMT BUY {order.quantity} {order.instrument.symbol} @ "
         f"{order.instrument.currency} {order.limit_price}",
-        f"client_order_id={str(cid)[:8]}... (SMART/{_US_MIC_TO_PRIMARY_EXCHANGE.get(order.instrument.venue, order.instrument.venue)})",
+        f"client_order_id={str(cid)[:8]}... venue={order.instrument.venue}",
     )
     try:
         await broker.submit(order)
