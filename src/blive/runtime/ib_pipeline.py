@@ -106,6 +106,43 @@ class IBRunResult:
     final_equity: Decimal = Decimal("0")
 
 
+@dataclass(frozen=True, slots=True)
+class IBMultiEquityPoint:
+    """One row of the multi-instrument equity curve at a rebalance close.
+
+    Per [ADR-044](../../../docs/decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043):
+    ``positions`` and ``mark_prices`` are per-instrument dicts keyed by
+    the symbol (string) so equity attribution stays clear when the
+    strategy holds positions in multiple instruments simultaneously.
+    """
+
+    time_utc: datetime
+    cash: Decimal
+    positions: dict[str, Decimal]  # symbol → quantity
+    mark_prices: dict[str, Decimal]  # symbol → close at this rebalance
+    equity: Decimal
+
+
+@dataclass
+class IBMultiRunResult:
+    """Outcome of a multi-instrument IB-paper run.
+
+    Companion to :class:`IBRunResult` for the single-instrument pipeline.
+    Per ADR-044, the multi-instrument flow has one ``IBBroker.submit``
+    call per per-instrument target-weight delta per rebalance; FSM
+    counters are aggregate across all instruments.
+    """
+
+    equity_curve: list[IBMultiEquityPoint] = field(default_factory=list)
+    breaches: list[RiskBreach] = field(default_factory=list)
+    fills_count: int = 0
+    submitted_count: int = 0
+    canceled_count: int = 0
+    rejected_count: int = 0
+    fills_by_symbol: dict[str, int] = field(default_factory=dict)
+    final_equity: Decimal = Decimal("0")
+
+
 # --- Public entry point ------------------------------------------------------
 
 
@@ -288,7 +325,251 @@ async def run_ib_pipeline(
     return result
 
 
+# --- Public entry point: multi-instrument (M2-IB.6 per ADR-044) -------------
+
+
+async def run_ib_multi_pipeline(
+    *,
+    live_strategy: LiveStrategy,
+    broker: IBBroker,
+    market_data: PaperMarketData,
+    instruments: list[Instrument],
+    target_weights_series: pd.DataFrame,
+    starting_cash: Decimal = Decimal("1000000"),
+    base_currency: str = "USD",
+    order_type: OrderType = OrderType.MKT,
+    limit_price_offset_bps: Decimal = Decimal("50"),
+    event_wait_seconds: float = 10.0,
+    kill_switch: KillSwitch | None = None,
+) -> IBMultiRunResult:
+    """Multi-instrument IB-paper pipeline per [ADR-044](../../../docs/decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043).
+
+    Sibling of :func:`run_ib_pipeline`; same FSM-drain shape, but extends
+    from one instrument to N. The Sizer (:func:`blive.sizing.size_orders`)
+    is multi-instrument-capable already; this function is the per-bar
+    orchestration wrapper.
+
+    Caller contract:
+
+    1. Construct an :class:`IBBroker` and call :meth:`IBBroker.connect`.
+    2. Provide a :class:`PaperMarketData` whose fixtures cover all
+       ``instruments``; the first instrument's bar timeline is the
+       canonical rebalance schedule (other instruments get their bars
+       looked up at the same close timestamps via
+       :meth:`PaperMarketData.latest`).
+    3. Provide ``target_weights_series`` indexed by bar
+       ``close_time_utc``, columns by instrument symbol (e.g. ``TQQQ`` /
+       ``TMF`` / ``IEF``), values ``float`` weights summing to ≤ 1.0
+       per row.
+
+    Per-rebalance flow:
+
+    1. Read the canonical bar from ``instruments[0]``.
+    2. Look up the weights row at this bar's ``close_time_utc``; skip if
+       absent.
+    3. Build per-instrument current-position dict + per-instrument
+       price-lookup, call :func:`size_orders` once with the full
+       ``target_weights: dict[str, float]``.
+    4. Each Order returned goes through the RiskEngine, then IBBroker;
+       per-order FSM drain awaits terminal state.
+    5. Accumulate fills in per-instrument positions / cash; mark
+       multi-instrument equity at the rebalance close.
+
+    Returns the broker still connected (caller manages disconnect).
+    """
+    if not broker.is_connected:
+        raise RuntimeError("run_ib_multi_pipeline expects an already-connected IBBroker")
+    if not instruments:
+        raise ValueError("instruments list must be non-empty")
+    if target_weights_series.empty:
+        raise ValueError("target_weights_series must not be empty")
+
+    # Per-symbol Instrument lookup; the canonical timeline is instruments[0].
+    inst_by_symbol: dict[str, Instrument] = {i.symbol: i for i in instruments}
+    canonical_inst = instruments[0]
+    canonical_bars = market_data.bars(canonical_inst)
+    if not canonical_bars:
+        raise ValueError(f"no bars in fixture for canonical instrument {canonical_inst}")
+
+    risk_engine = RiskEngine(
+        config=_risk_config_from_live(live_strategy),
+        kill_switch=kill_switch if kill_switch is not None else KillSwitch(),
+        strategy_id=live_strategy.live_config.strategy_id,
+    )
+    alert = LogAlert()
+    await _drain_startup_events(broker)
+
+    cash = starting_cash
+    positions: dict[str, Position] = {}  # keyed by symbol
+    result = IBMultiRunResult()
+
+    for canonical_bar in canonical_bars:
+        t = canonical_bar.close_time_utc
+        ts_key = pd.Timestamp(t)
+        if ts_key not in target_weights_series.index:
+            continue
+
+        # Per-instrument bar lookup: use the canonical bar timestamp; for
+        # other instruments, look up the latest bar at-or-before this
+        # timestamp via PaperMarketData's helper. US calendars are
+        # uniform so this typically matches exactly; defensive against
+        # split-day fixtures.
+        bars_by_symbol: dict[str, Bar] = {canonical_inst.symbol: canonical_bar}
+        for inst in instruments[1:]:
+            other_bar = market_data.latest(inst, on_or_before=t)
+            if other_bar is None:
+                # Skip this rebalance entirely — incomplete cross-instrument data.
+                continue
+            bars_by_symbol[inst.symbol] = other_bar
+        if len(bars_by_symbol) != len(instruments):
+            continue
+
+        # Read the per-symbol target weights for this rebalance. Sizer
+        # expects Decimal values; cast via str → Decimal to avoid float-
+        # repr artefacts (Decimal(0.5) != Decimal("0.5") strictly).
+        weights_row = target_weights_series.loc[ts_key]
+        target_weights: dict[str, Decimal] = {}
+        for inst in instruments:
+            if inst.symbol in weights_row.index:
+                target_weights[inst.symbol] = Decimal(str(float(weights_row[inst.symbol])))
+            else:
+                target_weights[inst.symbol] = Decimal("0")
+
+        # Sizer inputs: per-instrument resolver + price lookup.
+        def _resolve_instrument(
+            symbol: str, _by: dict[str, Instrument] = inst_by_symbol
+        ) -> Instrument:
+            return _by[symbol]
+
+        def _price_lookup(
+            inst: Instrument,
+            _bars: dict[str, Bar] = bars_by_symbol,
+        ) -> Decimal:
+            return _bars[inst.symbol].close
+
+        # Compute mark-to-market equity for the Sizer's NAV-slice math.
+        mark_prices: dict[str, Decimal] = {sym: bar.close for sym, bar in bars_by_symbol.items()}
+        equity = _compute_equity_multi(cash, positions, mark_prices)
+
+        sizer_in = SizerInput(
+            target_weights=target_weights,
+            equity=equity,
+            nav_slice=live_strategy.live_config.nav_slice,
+            current_positions=positions,
+            instrument_resolver=_resolve_instrument,
+            price_lookup=_price_lookup,
+            strategy_id=live_strategy.live_config.strategy_id,
+            now=t,
+        )
+        candidate_orders = size_orders(sizer_in)
+
+        for desired in candidate_orders:
+            risk_inputs = RiskInputs(
+                last_bar=bars_by_symbol[desired.instrument.symbol],
+                is_market_open=True,  # paper-test runs against historical bars
+                artefact_paths=dict(live_strategy.live_config.artefact_paths.paths),
+            )
+            approved, breaches = risk_engine.approve(desired, inputs=risk_inputs, now=t)
+            if breaches:
+                result.breaches.extend(breaches)
+                for b in breaches:
+                    await alert.send(
+                        b.alert_severity(),
+                        f"{BREACH_TOPIC}/{b.check.value}",
+                        b.detail,
+                    )
+            if approved is None:
+                continue
+
+            order_for_ib = _ib_order_from_desired(
+                desired=approved,
+                bar=bars_by_symbol[approved.instrument.symbol],
+                order_type=order_type,
+                limit_price_offset_bps=limit_price_offset_bps,
+            )
+
+            await broker.submit(order_for_ib)
+            result.submitted_count += 1
+            terminal_state, fill_event = await _drain_order_lifecycle(
+                broker=broker,
+                target_id=ClientOrderId(order_for_ib.client_order_id),
+                timeout_s=event_wait_seconds,
+            )
+
+            if (
+                terminal_state == OrderState.FILLED
+                and fill_event is not None
+                and fill_event.fill is not None
+            ):
+                fill = fill_event.fill
+                sym = fill.instrument.symbol
+                prior = positions.get(sym)
+                positions[sym] = apply_fill(
+                    prior,
+                    fill,
+                    strategy_id=live_strategy.live_config.strategy_id,
+                    now=t,
+                )
+                signed = fill.quantity if fill.side == OrderSide.BUY else -fill.quantity
+                cash -= signed * fill.price + fill.commission
+                result.fills_count += 1
+                result.fills_by_symbol[sym] = result.fills_by_symbol.get(sym, 0) + 1
+            elif terminal_state == OrderState.CANCELED:
+                result.canceled_count += 1
+            elif terminal_state == OrderState.REJECTED:
+                result.rejected_count += 1
+            else:
+                # Non-terminal after timeout — engine-cancel before next order.
+                try:
+                    await broker.cancel(ClientOrderId(order_for_ib.client_order_id))
+                except KeyError:
+                    pass
+                await _drain_order_lifecycle(
+                    broker=broker,
+                    target_id=ClientOrderId(order_for_ib.client_order_id),
+                    timeout_s=event_wait_seconds,
+                )
+                result.canceled_count += 1
+
+        # Mark multi-instrument equity at rebalance close.
+        post_equity = _compute_equity_multi(cash, positions, mark_prices)
+        snapshot_positions: dict[str, Decimal] = {
+            sym: pos.quantity for sym, pos in positions.items()
+        }
+        result.equity_curve.append(
+            IBMultiEquityPoint(
+                time_utc=t,
+                cash=cash,
+                positions=snapshot_positions,
+                mark_prices=dict(mark_prices),
+                equity=post_equity,
+            )
+        )
+
+    result.final_equity = result.equity_curve[-1].equity if result.equity_curve else starting_cash
+    return result
+
+
 # --- Helpers -----------------------------------------------------------------
+
+
+def _compute_equity_multi(
+    cash: Decimal,
+    positions: dict[str, Position],
+    mark_prices: dict[str, Decimal],
+) -> Decimal:
+    """Multi-instrument mark-to-market: cash + Σ (qty × mark_price) per
+    held position. Uses the symbol-keyed positions dict from the
+    multi-instrument pipeline; missing mark_prices for a held symbol
+    contributes zero (defensive — the canonical-timeline contract
+    guarantees a price for every instrument the pipeline tracks).
+    """
+    notional = Decimal("0")
+    for sym, pos in positions.items():
+        price = mark_prices.get(sym)
+        if price is not None:
+            notional += pos.quantity * price
+    return cash + notional
 
 
 def _ib_order_from_desired(
@@ -445,4 +726,11 @@ def _compute_equity(
     return cash + notional
 
 
-__all__ = ["IBEquityPoint", "IBRunResult", "run_ib_pipeline"]
+__all__ = [
+    "IBEquityPoint",
+    "IBMultiEquityPoint",
+    "IBMultiRunResult",
+    "IBRunResult",
+    "run_ib_multi_pipeline",
+    "run_ib_pipeline",
+]

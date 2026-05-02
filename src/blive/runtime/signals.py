@@ -202,4 +202,62 @@ def triple_lev_sma_eligibility(
     )
 
 
-__all__ = ["sma_crossover_position", "triple_lev_sma_eligibility"]
+def eligibility_to_target_weights(eligibility: pd.DataFrame) -> pd.DataFrame:
+    """Convert a wide eligibility DataFrame into target weights by row.
+
+    Implements the ``LongShortPortfolio + MaskSelector + EqualWeight``
+    semantics in pure DataFrame arithmetic for the specific A3 strategy
+    shape (per [ADR-045](../../../docs/decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030)
+    LongShortPortfolio dispatch + the strategy spec in
+    ``btest/research/Triple Leveraged ETF/triple_leveraged_etf_dsl.ipynb``).
+    For each row:
+
+    - Count the number of eligible columns (values >= 0.5; matches the
+      btest ``GreaterEqual(..., 0.5)`` boolean cast on the eligibility
+      ``ExternalFactor``).
+    - Each eligible column gets ``1 / count`` weight; non-eligible
+      columns get ``0.0``.
+    - Rows with zero eligible columns return all-zero (no position;
+      caller decides what to do — the driver typically treats this as
+      a flat-cash signal).
+
+    Output columns match input columns in order; index unchanged.
+
+    This is functionally equivalent to running btest's
+    ``compute_target_weights_for_date()`` with this strategy's spec
+    (LongShortPortfolio with empty short_book, target_gross_leverage=1.0,
+    MaskSelector(sma_eligible) + EqualWeight()) for every row. A future
+    blive iteration may swap to calling btest directly when strict
+    parity becomes load-bearing or other LongShortPortfolio strategies
+    introduce features beyond MaskSelector + EqualWeight (e.g., non-empty
+    short books, factor-weighted books, sector-neutrality).
+
+    Examples
+    --------
+    Eligibility row {TQQQ: 1.0, TMF: 1.0, IEF: 0.0} (both risk-on legs
+    active, IEF parked):
+        Target weights {TQQQ: 0.5, TMF: 0.5, IEF: 0.0}.
+
+    Eligibility row {TQQQ: 1.0, TMF: 0.0, IEF: 1.0} (TMF filtered out,
+    IEF engaged):
+        Target weights {TQQQ: 0.5, TMF: 0.0, IEF: 0.5}.
+
+    Eligibility row {TQQQ: 0.0, TMF: 0.0, IEF: 1.0} (both risk-on legs
+    filtered, fully in IEF):
+        Target weights {TQQQ: 0.0, TMF: 0.0, IEF: 1.0}.
+    """
+    if eligibility.empty:
+        return eligibility.copy()
+    bool_mask = eligibility >= 0.5
+    counts = bool_mask.sum(axis=1)
+    # Avoid divide-by-zero: rows with 0 eligible → all-zero target weights.
+    safe_counts = counts.replace(0, 1)  # divisor of 1 produces 0.0 weights since mask is all False
+    weights = bool_mask.astype(float).div(safe_counts, axis=0)
+    return weights
+
+
+__all__ = [
+    "sma_crossover_position",
+    "triple_lev_sma_eligibility",
+    "eligibility_to_target_weights",
+]

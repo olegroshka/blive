@@ -39,7 +39,12 @@ from blive.domain.types import (
     OrderSide,
 )
 from blive.risk import KillSwitch
-from blive.runtime.ib_pipeline import IBRunResult, run_ib_pipeline
+from blive.runtime.ib_pipeline import (
+    IBMultiRunResult,
+    IBRunResult,
+    run_ib_multi_pipeline,
+    run_ib_pipeline,
+)
 from blive.strategy.config import (
     ArtefactPaths,
     LiveOverrides,
@@ -413,3 +418,281 @@ def test_run_ib_pipeline_canceled_when_no_terminal_within_timeout(
     # The fake's cancel() emits CANCELED so count grows per attempt.
     assert result.canceled_count >= 1
     assert len(broker.canceled_ids) >= 1
+
+
+# --- Multi-instrument pipeline tests (M2-IB.6 per ADR-044) ------------------
+
+
+def _us_etf(symbol: str) -> Instrument:
+    """Construct a US ETF Instrument for multi-instrument tests."""
+    return Instrument(
+        symbol=symbol,
+        venue="XNAS",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+        tradability="spot",
+    )
+
+
+@pytest.fixture
+def triple_lev_fixture_paths(tmp_path: Path) -> dict[str, Path]:
+    """20-day fixtures for TQQQ, TMF, IEF — all sharing the same close
+    timestamps to mirror US calendar uniformity."""
+    base = datetime(2026, 1, 5, 15, 30, tzinfo=timezone.utc)
+    paths: dict[str, Path] = {}
+    starts = {"TQQQ": 50.0, "TMF": 30.0, "IEF": 100.0}
+    for symbol, start_price in starts.items():
+        rows = []
+        for i in range(20):
+            t = base + timedelta(days=i)
+            close = start_price + i * 0.1
+            rows.append(
+                dict(
+                    open_time_utc=t - timedelta(hours=8),
+                    close_time_utc=t,
+                    open=close - 0.05,
+                    high=close + 0.5,
+                    low=close - 0.5,
+                    close=close,
+                    volume=1000.0,
+                )
+            )
+        df = pd.DataFrame(rows)
+        p = tmp_path / f"{symbol}_20d.parquet"
+        df.to_parquet(p)
+        paths[symbol] = p
+    return paths
+
+
+@pytest.fixture
+def triple_lev_market_data(triple_lev_fixture_paths: dict[str, Path]) -> PaperMarketData:
+    fixtures = {_us_etf(symbol): path for symbol, path in triple_lev_fixture_paths.items()}
+    return PaperMarketData(fixtures=fixtures)
+
+
+@pytest.fixture
+def triple_lev_instruments() -> list[Instrument]:
+    """Canonical order — TQQQ first matches the order ADR-043 + the
+    eligibility parquet column convention."""
+    return [_us_etf("TQQQ"), _us_etf("TMF"), _us_etf("IEF")]
+
+
+def _both_legs_eligible_weights(canonical_bars_close_times: list[datetime]) -> pd.DataFrame:
+    """Always {TQQQ:0.5, TMF:0.5, IEF:0} — both risk-on legs active throughout."""
+    n = len(canonical_bars_close_times)
+    return pd.DataFrame(
+        {"TQQQ": [0.5] * n, "TMF": [0.5] * n, "IEF": [0.0] * n},
+        index=pd.to_datetime(canonical_bars_close_times, utc=True),
+    )
+
+
+def test_run_ib_multi_pipeline_requires_connected_broker(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    broker = _FakeIBBroker(is_connected=False)
+    live = _make_live_strategy()
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    weights = _both_legs_eligible_weights([b.close_time_utc for b in bars])
+    with pytest.raises(RuntimeError, match="already-connected"):
+        asyncio.run(
+            run_ib_multi_pipeline(
+                live_strategy=live,
+                broker=broker,  # type: ignore[arg-type]
+                market_data=triple_lev_market_data,
+                instruments=triple_lev_instruments,
+                target_weights_series=weights,
+            )
+        )
+
+
+def test_run_ib_multi_pipeline_empty_instruments_raises(
+    triple_lev_market_data: PaperMarketData,
+) -> None:
+    broker = _FakeIBBroker()
+    live = _make_live_strategy()
+    weights = pd.DataFrame({"TQQQ": [0.5]})
+    with pytest.raises(ValueError, match="non-empty"):
+        asyncio.run(
+            run_ib_multi_pipeline(
+                live_strategy=live,
+                broker=broker,  # type: ignore[arg-type]
+                market_data=triple_lev_market_data,
+                instruments=[],
+                target_weights_series=weights,
+            )
+        )
+
+
+def test_run_ib_multi_pipeline_empty_weights_raises(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    broker = _FakeIBBroker()
+    live = _make_live_strategy()
+    with pytest.raises(ValueError, match="must not be empty"):
+        asyncio.run(
+            run_ib_multi_pipeline(
+                live_strategy=live,
+                broker=broker,  # type: ignore[arg-type]
+                market_data=triple_lev_market_data,
+                instruments=triple_lev_instruments,
+                target_weights_series=pd.DataFrame(),
+            )
+        )
+
+
+def test_run_ib_multi_pipeline_happy_path_3_instruments_both_legs(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """Always {TQQQ:0.5, TMF:0.5, IEF:0} → both risk-on legs hold positions
+    throughout; daily rebalances may produce small adjustment fills as
+    equity drifts (this is correct: ADR-027 integer-share rounding +
+    daily rebalance against drifting equity → micro-rebalance fills).
+
+    Core invariants tested:
+    - Multi-instrument FSM round trips work (fills happen).
+    - Per-symbol fill tracking populates fills_by_symbol.
+    - Final positions are held in TQQQ and TMF (the two eligible legs).
+    - Equity curve has one row per bar (20 bars → 20 points)."""
+    broker = _FakeIBBroker()
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    weights = _both_legs_eligible_weights([b.close_time_utc for b in bars])
+
+    result: IBMultiRunResult = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+        )
+    )
+
+    # Multi-instrument fills happen across the 20-bar replay.
+    assert result.fills_count >= 2, "expected at least one entry fill per active leg"
+    assert result.submitted_count >= 2
+    assert result.rejected_count == 0
+    # Per-symbol tracking: both eligible legs accumulate fills.
+    assert result.fills_by_symbol.get("TQQQ", 0) >= 1
+    assert result.fills_by_symbol.get("TMF", 0) >= 1
+    # Equity curve: one row per canonical bar.
+    assert len(result.equity_curve) == 20
+    # Final-row positions: both eligible legs are held with positive qty.
+    final = result.equity_curve[-1]
+    assert final.positions.get("TQQQ", Decimal("0")) > Decimal("0")
+    assert final.positions.get("TMF", Decimal("0")) > Decimal("0")
+
+
+def test_run_ib_multi_pipeline_regime_flip_TMF_to_IEF(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """Day-1: {TQQQ:0.5, TMF:0.5, IEF:0} (both legs in). Day-10 onwards:
+    {TQQQ:0.5, TMF:0, IEF:0.5} (TMF leg parks in IEF). Pipeline must
+    SELL TMF + BUY IEF on day-10."""
+    broker = _FakeIBBroker()
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    times = [b.close_time_utc for b in bars]
+    n = len(times)
+    flip_idx = 10
+    weights = pd.DataFrame(
+        {
+            "TQQQ": [0.5] * n,
+            "TMF": [0.5] * flip_idx + [0.0] * (n - flip_idx),
+            "IEF": [0.0] * flip_idx + [0.5] * (n - flip_idx),
+        },
+        index=pd.to_datetime(times, utc=True),
+    )
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+        )
+    )
+
+    # Core invariants for the regime flip:
+    # - Some fills happen for all three instruments across the run.
+    # - The flip produces a SELL TMF + BUY IEF transition (sides observable
+    #   in submitted_orders).
+    # (Daily rebalance with drifting equity also produces small adjustment
+    # fills; we don't assert exact counts to keep the test robust.)
+    assert result.fills_count >= 3, "regime flip should yield at least entry + exit + new-entry"
+    sides = [(o.instrument.symbol, o.side) for o in broker.submitted_orders]
+    # The TMF leg must SELL at some point during the post-flip phase.
+    assert ("TMF", OrderSide.SELL) in sides
+    # IEF must BUY (the new safe-haven park leg).
+    assert ("IEF", OrderSide.BUY) in sides
+    # All three instruments see at least one fill.
+    assert result.fills_by_symbol.get("TQQQ", 0) >= 1
+    assert result.fills_by_symbol.get("TMF", 0) >= 1
+    assert result.fills_by_symbol.get("IEF", 0) >= 1
+
+
+def test_run_ib_multi_pipeline_kill_switch_armed_blocks_submits(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """Kill-switch armed pre-run → zero submits across all instruments."""
+    broker = _FakeIBBroker()
+    live = _make_live_strategy()
+    ks = KillSwitch()
+    ks.arm("multi-instrument kill-switch test")
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    weights = _both_legs_eligible_weights([b.close_time_utc for b in bars])
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+            kill_switch=ks,
+        )
+    )
+
+    assert result.fills_count == 0
+    assert result.submitted_count == 0
+    assert len(broker.submitted_orders) == 0
+    # Kill-switch fires once per Sizer-produced order per rebalance, across
+    # multiple bars + instruments → many breaches.
+    assert len(result.breaches) >= 1
+
+
+def test_run_ib_multi_pipeline_equity_curve_includes_all_instruments(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """IBMultiEquityPoint.mark_prices captures every instrument's close
+    at each rebalance, even those without held positions."""
+    broker = _FakeIBBroker()
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    weights = _both_legs_eligible_weights([b.close_time_utc for b in bars])
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+        )
+    )
+    final = result.equity_curve[-1]
+    # All 3 instruments have mark prices (even IEF which has no held position).
+    assert set(final.mark_prices.keys()) == {"TQQQ", "TMF", "IEF"}
+    assert all(p > Decimal("0") for p in final.mark_prices.values())

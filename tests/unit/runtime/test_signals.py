@@ -9,7 +9,11 @@ import pandas as pd
 import pytest
 
 from blive.domain.types import AssetClass, Bar, Instrument
-from blive.runtime.signals import sma_crossover_position, triple_lev_sma_eligibility
+from blive.runtime.signals import (
+    eligibility_to_target_weights,
+    sma_crossover_position,
+    triple_lev_sma_eligibility,
+)
 
 
 def _instrument() -> Instrument:
@@ -205,6 +209,107 @@ def test_triple_lev_eligibility_empty_input_returns_empty_frame() -> None:
     df = triple_lev_sma_eligibility(qqq_closes=qqq, tlt_closes=tlt)
     assert len(df) == 0
     assert list(df.columns) == ["TQQQ", "TMF", "IEF"]
+
+
+def test_eligibility_to_target_weights_both_legs_eligible_equal_weights() -> None:
+    """{TQQQ:1, TMF:1, IEF:0} → {TQQQ:0.5, TMF:0.5, IEF:0}."""
+    eligibility = pd.DataFrame(
+        {"TQQQ": [1.0], "TMF": [1.0], "IEF": [0.0]},
+        index=_date_index(1),
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    row = weights.iloc[0]
+    assert row["TQQQ"] == 0.5
+    assert row["TMF"] == 0.5
+    assert row["IEF"] == 0.0
+
+
+def test_eligibility_to_target_weights_one_leg_filtered_engages_ief() -> None:
+    """{TQQQ:1, TMF:0, IEF:1} → {TQQQ:0.5, TMF:0, IEF:0.5}."""
+    eligibility = pd.DataFrame(
+        {"TQQQ": [1.0], "TMF": [0.0], "IEF": [1.0]},
+        index=_date_index(1),
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    row = weights.iloc[0]
+    assert row["TQQQ"] == 0.5
+    assert row["TMF"] == 0.0
+    assert row["IEF"] == 0.5
+
+
+def test_eligibility_to_target_weights_only_ief_eligible_full_park() -> None:
+    """{TQQQ:0, TMF:0, IEF:1} → {TQQQ:0, TMF:0, IEF:1.0} (100% safe-haven park)."""
+    eligibility = pd.DataFrame(
+        {"TQQQ": [0.0], "TMF": [0.0], "IEF": [1.0]},
+        index=_date_index(1),
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    row = weights.iloc[0]
+    assert row["TQQQ"] == 0.0
+    assert row["TMF"] == 0.0
+    assert row["IEF"] == 1.0
+
+
+def test_eligibility_to_target_weights_no_eligible_returns_all_zero() -> None:
+    """Edge case: no column eligible (shouldn't happen for the M2-IB.6
+    strategy by construction — IEF is always eligible when both risk-on
+    legs are filtered — but the helper is defensive)."""
+    eligibility = pd.DataFrame(
+        {"TQQQ": [0.0], "TMF": [0.0], "IEF": [0.0]},
+        index=_date_index(1),
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    row = weights.iloc[0]
+    assert row["TQQQ"] == 0.0
+    assert row["TMF"] == 0.0
+    assert row["IEF"] == 0.0
+
+
+def test_eligibility_to_target_weights_multi_row_preserves_index() -> None:
+    """Output index matches input index; per-row computation is independent."""
+    idx = _date_index(3)
+    eligibility = pd.DataFrame(
+        {
+            "TQQQ": [1.0, 0.0, 1.0],
+            "TMF": [1.0, 0.0, 0.0],
+            "IEF": [0.0, 1.0, 1.0],
+        },
+        index=idx,
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    assert (weights.index == idx).all()
+    # Row 0: both legs eligible → 50/50
+    assert weights.iloc[0]["TQQQ"] == 0.5
+    assert weights.iloc[0]["TMF"] == 0.5
+    # Row 1: only IEF
+    assert weights.iloc[1]["IEF"] == 1.0
+    # Row 2: TQQQ + IEF
+    assert weights.iloc[2]["TQQQ"] == 0.5
+    assert weights.iloc[2]["IEF"] == 0.5
+
+
+def test_eligibility_to_target_weights_empty_returns_empty() -> None:
+    eligibility = pd.DataFrame({"TQQQ": [], "TMF": [], "IEF": []})
+    weights = eligibility_to_target_weights(eligibility)
+    assert weights.empty
+
+
+def test_eligibility_to_target_weights_row_sums_to_one_when_at_least_one_eligible() -> None:
+    """For all rows where ≥ 1 column is eligible, weights sum to 1.0
+    (target_gross_leverage=1.0 invariant from the strategy spec)."""
+    idx = _date_index(4)
+    eligibility = pd.DataFrame(
+        {
+            "TQQQ": [1.0, 1.0, 0.0, 0.0],
+            "TMF": [1.0, 0.0, 1.0, 0.0],
+            "IEF": [0.0, 1.0, 1.0, 1.0],
+        },
+        index=idx,
+    )
+    weights = eligibility_to_target_weights(eligibility)
+    row_sums = weights.sum(axis=1)
+    # Every row has at least one eligible → sum = 1.0
+    assert (row_sums == 1.0).all()
 
 
 def test_triple_lev_eligibility_output_columns_in_canonical_order() -> None:
