@@ -2,7 +2,15 @@
 
 This file records material amendments to the **Cognitive Cartography** discipline as articulated in [`CONTEXT_PROTOCOL.md`](../../CONTEXT_PROTOCOL.md). Each entry captures the amendment, motivation, ADRs introduced, artefacts changed, and the implications for the next iteration of the methodology paper at [`docs/method/paper/cognitive_cartography.tex`](paper/cognitive_cartography.tex).
 
-The paper is updated separately when amendments accumulate enough to warrant a new edition; this log is the staging ground for that update.
+## Scope note (2026-05-02)
+
+The systematic research and paper-iteration work for Cognitive Cartography — and for the broader human / agent substrate emergence question that Amendment v0.2 raised — is moving to a **separate research project** with its own publication trajectory and proper academic apparatus. `blive` is no longer the home for that paper's revision.
+
+Within `blive`, this log continues to serve as a **raw-material accumulator**: each new amendment captures the operational intuition and substrate evidence that arises naturally from the project's own work, in a form the future systematic research can draw on without losing the context of where it was discovered. The conventions below are unchanged; only the downstream consumer is.
+
+The in-tree paper source ([`paper/cognitive_cartography.tex`](paper/cognitive_cartography.tex)) remains at DRAFT v0.1 as a historical staging artefact — it will not be revised in-repo. The separate research project picks up the staged amendments (v0.2, v0.3, and any future entries here) when it is ready to integrate them.
+
+## Convention
 
 ## Convention
 
@@ -17,6 +25,8 @@ Each entry has:
 - Cross-references
 
 Append-only. Resolved amendments are not edited; if a later amendment partly reverses or modifies an earlier one, the new entry references the prior with a "supersedes" note.
+
+The "Paper sections affected" subsection in each amendment is preserved as guidance for the future separate research project; it is not actionable inside this repo.
 
 ---
 

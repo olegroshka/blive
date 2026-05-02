@@ -29,6 +29,8 @@ Required packages: `lmodern`, `geometry`, `microtype`, `tikz` (with libraries `p
 
 DRAFT v0.1 — §1 and §2 fully drafted; §3–§10 outlined; eight figures included as TikZ; ~25 references seeded in `references.bib`.
 
+**Frozen in-repo as of 2026-05-02.** The systematic paper-iteration and human / agent substrate emergence research has moved to a separate research project with its own publication trajectory. This folder remains as a historical staging artefact — the LaTeX source above is preserved at DRAFT v0.1 and will not be revised here. Amendments continue to accumulate at [`docs/method/Amendments_Log.md`](../Amendments_Log.md) as raw material the separate project can draw on; see that file's "Scope note (2026-05-02)" preamble.
+
 ## Figures
 
 | Id | Label | Width | Status |
