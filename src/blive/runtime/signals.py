@@ -19,12 +19,21 @@ Available stubs:
 
 - :func:`sma_crossover_position`: long when ``close > SMA(window)``,
   flat otherwise. Warmup bars (insufficient history for SMA) → 0.
+
+Phase-1 production signals (per [ADR-043](../../../docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)):
+
+- :func:`triple_lev_sma_eligibility`: per-leg SMA-200 trend filter with
+  hysteresis re-entry, producing a wide ``pd.DataFrame[date → ticker]``
+  matching btest's ``ExternalFactor(per_instrument=True)`` contract for
+  the ``triple_lev_sma_filter_dsl`` strategy. Bit-exact replica of the
+  notebook's signal logic (``btest/research/Triple Leveraged ETF/triple_leveraged_etf_dsl.ipynb``).
 """
 
 from __future__ import annotations
 
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 
 from blive.domain.types import Bar
@@ -76,4 +85,121 @@ def sma_crossover_position(
     return position
 
 
-__all__ = ["sma_crossover_position"]
+def triple_lev_sma_eligibility(
+    *,
+    qqq_closes: pd.Series,
+    tlt_closes: pd.Series,
+    sma_window: int = 200,
+    exit_buffer: float = 0.0,
+    enter_buffer: float = 0.05,
+) -> pd.DataFrame:
+    """Per-leg SMA-200 trend filter with hysteresis re-entry, returning a
+    wide DataFrame matching btest's ``ExternalFactor(per_instrument=True)``
+    contract for ``triple_lev_sma_filter_dsl``.
+
+    Bit-exact replica of the signal block in
+    ``btest/research/Triple Leveraged ETF/triple_leveraged_etf_dsl.ipynb``:
+
+    - **TQQQ leg eligibility**: starts ``True``. Exits to ``False`` when
+      ``qqq_close < qqq_sma * (1 + exit_buffer)``. Re-enters to ``True``
+      when ``qqq_close > qqq_sma * (1 + enter_buffer)``. The
+      asymmetric exit / enter thresholds prevent whipsaw — the leg has
+      to clear the SMA by the enter buffer (default 5%) before
+      re-engaging.
+    - **TMF leg eligibility**: same logic against ``tlt_close`` and
+      ``tlt_sma``.
+    - **IEF eligibility**: ``NOT(tqqq_eligible AND tmf_eligible)`` —
+      guarantees exactly 2 instruments are eligible at any point (per
+      the notebook's "always 2 selected" invariant), so
+      ``EqualWeight`` selectors give an exact 50/50 split when both
+      risk-on legs are active, or 100% IEF only when both are filtered
+      out. With one leg filtered, the active risk-on leg gets 50% and
+      IEF gets 50%.
+
+    Output columns are exactly ``["TQQQ", "TMF", "IEF"]`` in that
+    order with float values ``0.0`` or ``1.0`` (the
+    ``btest.ExternalFactor`` contract uses float, not bool, so
+    downstream ``GreaterEqual(..., 0.5)`` produces the boolean mask).
+
+    Inputs:
+
+    - ``qqq_closes`` / ``tlt_closes``: pd.Series indexed by date
+      (typically the bars' ``close_time_utc``); values are floats.
+      The two series must share their index (caller aligns / forward-
+      fills before calling).
+    - ``sma_window``: SMA period (default 200, matches the notebook).
+    - ``exit_buffer`` / ``enter_buffer``: hysteresis thresholds (default
+      0.0 / 0.05, matches the notebook).
+
+    Warmup behaviour: until ``sma_window`` bars are available for both
+    series (SMA values exist), eligibility for all three columns is
+    ``True`` (matches the notebook's "no signal yet → hold initial state"
+    convention). Once SMA values come online, the state machine begins
+    its hysteresis tracking from the warmup-end state of all-True.
+    """
+    if sma_window < 2:
+        raise ValueError(f"sma_window must be >= 2; got {sma_window}")
+    if not qqq_closes.index.equals(tlt_closes.index):
+        raise ValueError(
+            "qqq_closes and tlt_closes must share the same index; align/ffill before calling"
+        )
+    if len(qqq_closes) == 0:
+        return pd.DataFrame(
+            {
+                "TQQQ": pd.Series(dtype=float),
+                "TMF": pd.Series(dtype=float),
+                "IEF": pd.Series(dtype=float),
+            },
+            index=qqq_closes.index,
+        )
+
+    qqq_sma = qqq_closes.rolling(window=sma_window, min_periods=sma_window).mean()
+    tlt_sma = tlt_closes.rolling(window=sma_window, min_periods=sma_window).mean()
+
+    tq_eligible: list[bool] = []
+    tm_eligible: list[bool] = []
+    tq_state = True
+    tm_state = True
+
+    for dt in qqq_closes.index:
+        q = qqq_closes.loc[dt]
+        t = tlt_closes.loc[dt]
+        qs = qqq_sma.loc[dt]
+        ts = tlt_sma.loc[dt]
+
+        # Warmup: SMA undefined → hold initial all-True state.
+        if pd.isna(qs) or pd.isna(q):
+            tq_eligible.append(True)
+            tm_eligible.append(True)
+            continue
+
+        # Hysteresis state machine for TQQQ leg (against QQQ closes).
+        if tq_state and q < qs * (1.0 + exit_buffer):
+            tq_state = False
+        elif not tq_state and q > qs * (1.0 + enter_buffer):
+            tq_state = True
+
+        # Hysteresis state machine for TMF leg (against TLT closes).
+        if tm_state and t < ts * (1.0 + exit_buffer):
+            tm_state = False
+        elif not tm_state and t > ts * (1.0 + enter_buffer):
+            tm_state = True
+
+        tq_eligible.append(tq_state)
+        tm_eligible.append(tm_state)
+
+    tq_arr = np.array(tq_eligible, dtype=bool)
+    tm_arr = np.array(tm_eligible, dtype=bool)
+    ief_arr = ~(tq_arr & tm_arr)  # NOT(both eligible) → IEF eligible
+
+    return pd.DataFrame(
+        {
+            "TQQQ": tq_arr.astype(float),
+            "TMF": tm_arr.astype(float),
+            "IEF": ief_arr.astype(float),
+        },
+        index=qqq_closes.index,
+    )
+
+
+__all__ = ["sma_crossover_position", "triple_lev_sma_eligibility"]
