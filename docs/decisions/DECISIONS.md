@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-05-02
-version: 0.13
+version: 0.14
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -50,7 +50,7 @@ referenced_by:
 | [ADR-018](#adr-018--uk-equity-strategies-deferred-to-post-m8) | UK equity strategies deferred to post-M8 | ACCEPTED | 2026-04-26 | OQ-021 |
 | [ADR-019](#adr-019--a3-archetype-generalises-to-other-leveraged-etf-pairs) | A3 archetype generalises to other leveraged-ETF pairs | ACCEPTED | 2026-04-26 | OQ-022 |
 | [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10) | Phase 1 NAV slice: 5–10% of total, cap 10% | ACCEPTED | 2026-04-26 | OQ-024 |
-| [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) | CAC ETF proxy: `CAC.PA` (Lyxor CAC 40 UCITS ETF) | ACCEPTED | 2026-04-26 | OQ-025 |
+| [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) | CAC ETF proxy: `CAC.PA` (Lyxor CAC 40 UCITS ETF) | SUPERSEDED-BY-ADR-043 | 2026-04-26 | OQ-025 |
 | [ADR-022](#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning) | TKAN artefact freshness window: 30d hard, 21d warning | ACCEPTED | 2026-04-26 | OQ-026 |
 | [ADR-023](#adr-023--tkan-artefact-path-and-refresh-ownership) | TKAN artefact path and refresh ownership | ACCEPTED | 2026-04-26 | OQ-027 |
 | [ADR-024](#adr-024--add-session-retrospective-artefact-type) | Add session-retrospective artefact type | ACCEPTED | 2026-04-26 | — |
@@ -70,6 +70,7 @@ referenced_by:
 | [ADR-038](#adr-038--ig-rate-limit-defaults-parameterise-adr-031) | IG rate-limit defaults (parameterise ADR-031) | ACCEPTED | 2026-04-27 | — |
 | [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | ACCEPTED | 2026-04-27 | — |
 | [ADR-042](#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point) | Session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point | ACCEPTED | 2026-05-02 | — |
+| [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) | Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2) | ACCEPTED | 2026-05-02 | — |
 
 ---
 
@@ -675,10 +676,11 @@ Allocate **5–10% of total account NAV** to the Phase 1 strategy, with a **hard
 
 ## ADR-021 — CAC ETF proxy: `CAC.PA` (Lyxor CAC 40 UCITS ETF)
 
-- **status:** ACCEPTED
+- **status:** SUPERSEDED-BY-ADR-043 (was ACCEPTED 2026-04-26 → 2026-05-02)
 - **date:** 2026-04-26
 - **decider:** Oleg
 - **supersedes:** none
+- **superseded by:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — Phase 1 strategy switched from A2 (`tkan_v4_momentum_timing` on `CAC.PA`) to A3 (`triple_lev_sma_filter_dsl` on TQQQ/TMF/IEF). The CAC.PA Instrument + Yahoo-suffix translation per ADR-041 + DD-7 §3 / §3.1 substrate stay durable (CAC.PA is wire-validated end-to-end at `M2-IB.4a-happy-cacpa` and may revive as a future strategy / comparison instrument); only the *Phase 1 strategy designation* moves.
 - **resolves:** [OQ-025](OPEN_QUESTIONS.md#oq-025--which-cac-etf-proxy-for-the-phase-1-strategy)
 
 ### Context
@@ -1896,6 +1898,82 @@ Adopt **session-bootstrap files** as the canonical L0 implementation under the a
 
 ---
 
+## ADR-043 — Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2)
+
+- **status:** ACCEPTED
+- **date:** 2026-05-02
+- **decider:** Oleg (with Claude)
+- **supersedes:** [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — CAC ETF proxy as the Phase 1 strategy designation. The CAC.PA Instrument + Yahoo-suffix substrate per ADR-041 + DD-7 stay durable.
+- **amends:** [KB-5 §7 phased priority](../kb/strategy_taxonomy.md#7-nav-slice--priorities) — A3 promoted to Phase 1; A2 (`tkan_v4_momentum_timing`) demoted to deferred-no-target.
+
+### Context
+
+The M2-IB.4a tag chain wire-validated the IB write side end-to-end against IB Paper for **single-instrument** flow on `CAC.PA` (REJECTED disambiguation at `M2-IB.4a-rejected`; SUBMITTED → ACCEPTED → CANCELED at `M2-IB.4a-happy` and `M2-IB.4a-happy-cacpa`). The M2-IB.5 architectural-surface run (60-bar tape replay, 35 FSM cycles, 0 rejected, 0 breaches) validated the single-instrument pipeline. M2-IB.5 was originally scoped as the strategy run for A2 (`tkan_v4_momentum_timing` 1× on CAC.PA per ADR-021).
+
+Operator decision 2026-05-02: switch the Phase 1 strategy from A2 to **A3 — `triple_lev_sma_filter_dsl`** (the strategy in `btest/research/Triple Leveraged ETF/triple_leveraged_etf_dsl.ipynb`). Rationale: A3 is the operator's *first live-trading candidate*; validating the production path end-to-end now is more valuable than running A2 paper validation as an intermediate step that doesn't directly compound into live readiness.
+
+A3's mechanics (per [KB-5 §2 A3](../kb/strategy_taxonomy.md#a3--multi-instrument-trend-filter-with-safe-haven-park-s-universe-daily) and the notebook):
+
+- Universe: **TQQQ** (3× QQQ), **TMF** (3× TLT 20+y Treasury), **IEF** (7-10y Treasury safe-haven park). All US-listed ETFs on NASDAQ / NYSE.
+- Two independent legs, 50 / 50: TQQQ leg holds TQQQ when QQQ > SMA-200 (5% hysteresis re-entry), parks in IEF otherwise. TMF leg holds TMF when TLT > SMA-200, parks in IEF otherwise.
+- IEF eligibility = `NOT(TQQQ_eligible AND TMF_eligible)` — guarantees exactly 2 instruments selected → `EqualWeight` gives 50 / 50.
+- DSL realisation: `LongShortPortfolio` (empty short_book) + `MaskSelector(signal_name="sma_eligible")` + `ExternalFactor(per_instrument=True)` reading a wide parquet with one bool column per ticker.
+- Execution: `signal_delay_bars=1` (T+1 open).
+- Daily rebalance (DSL form; v1 notebook does bimonthly — operational refinement deferred to a future "smart rebalance" strategy variant per the operator).
+- Backtest stats from the notebook: CAGR ~24%, Sharpe ~0.88, max DD ~-37%.
+
+### Decision
+
+1. **Phase 1 strategy = `triple_lev_sma_filter_dsl`** (archetype A3 per KB-5 §2). Universe TQQQ + TMF + IEF.
+2. **NAV slice unchanged**: 5–10% of total NAV per [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10). The strategy's internal 3× leverage on TQQQ / TMF is *strategy-internal exposure*, distinct from the engine-level NAV slice; ADR-020 still applies.
+3. **Daily rebalance** for the M2-IB.6 paper run (matches the DSL form). Bimonthly v1-style cadence is a future operational refinement, not a Phase 1 decision.
+4. **T+1 open execution** per `signal_delay_bars=1`. Order type = MKT (matches `run_m2ib5_paper.py` default; LMT is selectable).
+5. **Live cutover venue: IB only.** Per the operator's M2-IB.6 scope decision, the IG-side cross-broker testing originally considered alongside this switch is dropped from M2-IB.6 scope (IG broker code stays archived per RETRO-M2-IG; revival not planned).
+6. A2 (`tkan_v4_momentum_timing`) — code stays in the repo (loader, `SingleAssetRunner` dispatch via ADR-030, paper-pipeline wiring, tests). Marked **DEFERRED-NO-TARGET** in INV-1 / KB-5; reusable when an A2-style timing strategy returns to scope.
+7. ADR-021 (CAC ETF proxy as Phase 1 strategy) → SUPERSEDED-BY-ADR-043. The CAC.PA Instrument + Yahoo-suffix translation table (DD-7 §3.1, ADR-041) + the M2-IB.4a-happy-cacpa wire validation are durable substrate; only the *Phase 1 strategy designation* moves.
+
+### Alternatives Considered
+
+1. **Stay with A2 on CAC.PA per ADR-021.** Rejected because (a) operator's intent is A3 as first live-trading candidate, so paper-validating A2 is rework; (b) A3 forces the multi-instrument pipeline + LongShortPortfolio dispatch + US-equity SMART routing that compound into Phase 2 / live readiness; (c) the M2-IB.4a-* tags already cover the IB write-side wire validation that A2 paper run would have re-exercised.
+2. **Run BOTH A2 paper-validated AND A3 sequentially.** Rejected — doubles session count for marginal additional confidence; A2 has unit-test coverage already; the operator's stated next step is live trading on A3.
+3. **A3 with 1× / 2× ETF variants (QQQ / TLT / IEF or 2× ETFs).** Rejected per operator: keep the 3× leveraged ETF universe as designed; dialing back the leverage changes the strategy's regime characteristics.
+4. **Bimonthly rebalance per the v1 notebook.** Rejected for M2-IB.6 — DSL realisation is daily; operator-noted intent is a future "smart rebalance" strategy variant where the cadence is dynamic. Daily is the available form for the paper run.
+5. **Test on both IB Paper AND IG paper before any live cutover (the original Q1 / Q5 / Q6 dual-broker proposal).** Rejected per operator — focus on IB operationability first; cross-broker testing can revive later if IG returns to scope. M2-IB.6 is IB-only.
+
+### Consequences
+
+- **Positive:** Phase 1 paper validation matches the actual live-trading candidate. Multi-instrument pipeline (per ADR-044) + LongShortPortfolio btest dispatch (per ADR-045) + IB SMART for US equities (per ADR-046) all become Phase 1 substrate, compounding into Phase 2 readiness. US-equity venues (XNAS / XNYS / ARCX) get exercised — broadens venue coverage beyond CAC.PA's single-venue path.
+- **Negative:** bigger lift before first paper FILLED validation; complexity bugs hit at higher stakes than they would have on the simpler A2 path. Leveraged-ETF financing parity per [KB-6 §4](../kb/cost_margin_dictionary.md) becomes load-bearing earlier (3× ETFs decay overnight; intraday parity diverges from a static-rate model). The M2-IB.5 architectural-surface validation we just got remains useful but doesn't generalise to multi-instrument.
+- **Risk:** the 3× leveraged ETFs amplify downside; even at 5% NAV slice, the strategy-internal max DD of -37% (per the notebook's backtest) maps to ~-1.85% drawdown on total NAV — still small, but a meaningful test of RC-04 (daily loss thresholds) and RC-11 (drawdown scaling) when those land at M4.
+- **Follow-ups:**
+  - INV-1 strategies — A3 row promoted to Phase 1 (M2-IB.6 target); A2 row marked DEFERRED-NO-TARGET (existing code stays).
+  - INV-10 asset_classes — `us_etf` already at "high — Phase 1, 2, 3"; no change needed but the priority becomes load-bearing now rather than later.
+  - KB-5 §7 phased priority reordered: A3 → Phase 1 (M2-IB.6); A2 → deferred-no-target. Phase 2 / Phase 3 / Phase 4+ ordering otherwise preserved.
+  - DD-7 §3 grows US ETF venues with the SMART routing convention (per ADR-046) — XNAS / XNYS / ARCX → SMART with primaryExchange hint.
+  - Multi-instrument pipeline support (per ADR-044) — `run_ib_pipeline` extends from `instrument: Instrument` to `instruments: list[Instrument]` + `target_weights_series: pd.DataFrame`.
+  - LongShortPortfolio btest dispatch (per ADR-045) — wires `compute_target_weights_for_date()` analogous to `SingleAssetRunner` for TimingPortfolio per ADR-030.
+  - Refresh script extended for QQQ + TLT + TQQQ + TMF + IEF (5 tickers; produces a wide eligibility-signals parquet matching `triple_lev_sma_eligible.parquet` format).
+  - TASK_REGISTRY: M2-IB.5 closes at architectural surface 2026-05-02 (CLOSED-EARLY-BY-OPERATOR per the discipline-extension noted in RETRO-M2-IG §"Recommendations for the discipline itself"); M2-IB.6 opens with sub-milestones .6.1 (multi-instrument pipeline + 5-ticker refresh + LongShortPortfolio wiring) / .6.2 (IB Paper end-to-end run during US RTH) / .6-close (RETRO-M2-IB + NEXT_PROMPT v0.6).
+  - The CAC.PA SBF historical-data subscription that was an open M2-IB.5 prereq (per INV-14 §"Codes catalogued in KB-3 but not yet observed" + the operator-action item from `b21c43c`) is no longer needed — drop from operator-prereqs.
+  - The `run_m2ib5_paper.py` driver stays in repo as durable substrate for the single-instrument-pipeline shape; the M2-IB.6.2 driver `run_m2ib6_ib_paper.py` is its multi-instrument analogue.
+
+### Cross-References
+
+- [KB-5 §2 A3](../kb/strategy_taxonomy.md#a3--multi-instrument-trend-filter-with-safe-haven-park-s-universe-daily) — strategy archetype.
+- [KB-5 §7](../kb/strategy_taxonomy.md#7-nav-slice--priorities) — phased priority (amended by this ADR).
+- [ADR-013](#adr-013--v1-scope-etf-and-index-strategies-only) — v1 ETF/index scope (still holds; A3 is ETF).
+- [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) — leveraged-ETF leverage path; A3 is the canonical Phase 1 instance.
+- [ADR-019](#adr-019--a3-archetype-generalises-to-other-leveraged-etf-pairs) — A3 generalisation; Phase 1 picks the canonical TQQQ / TMF / IEF instance.
+- [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10) — NAV slice unchanged.
+- [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — superseded.
+- [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) — per-archetype dispatch; ADR-045 lights up the LongShortPortfolio path.
+- [ADR-044](#adr-044--multi-instrument-pipeline-support) — pipeline extension (companion ADR).
+- [ADR-045](#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) — interpreter dispatch (companion ADR).
+- [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) — IB SMART for US equities (companion ADR).
+- INV-1 / INV-10 / TASK_REGISTRY — substrate amendments in the same commit batch.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1911,3 +1989,4 @@ Adopt **session-bootstrap files** as the canonical L0 implementation under the a
 - **v0.11 (2026-04-28)** — M2-IB.3 prereq closure. Added ADR-040 (Phase 1 deployment target: Windows host with native IB Gateway; no Docker / IBC for paper-mode dev; Linux VM revisited at M8 production cutover). Drafted PROPOSED, accepted same-session per the established same-day-ACCEPTED pattern; status flipped to ACCEPTED. Closes the "Decide deployment target" item from [TASK_REGISTRY M2-IB §"Operator-side prerequisites"](../../TASK_REGISTRY.md). Daily 23:45 ET TWS-restart handled by operator-managed manual relogin during the M2-IB.5 ≥5-trading-day run; blive's reconciliation handles the disconnect/reconnect transient unchanged.
 - **v0.12 (2026-05-01)** — M2-IB.3a-resolved milestone flips. ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`) PROPOSED → ACCEPTED: `IBInstrumentResolver` exercised against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` 2026-05-01) and resolved Phase 1 instrument cleanly (`CAC.PA` → `conId=11183823`). Body of ADR-032 unchanged (append-only); status field flipped + PROPOSED→ACCEPTED date trail added in the ADR header. Added ADR-041 (Yahoo-suffix translation in IB instrument resolver) — drafted PROPOSED then ACCEPTED in same commit per established same-day-ACCEPTED pattern; refines ADR-032 with the EODHD/Yahoo `.PA` suffix-stripping rule discovered when the first probe attempt failed with IB error 200 on `CAC.PA`. Yahoo-suffix table seeded for `XPAR/.PA`, `XLON/.L`, `XETR/.DE`, `XAMS/.AS`. The broker-neutral `Instrument` keeps its EODHD-friendly form per ADR-004; only the IB resolver translates. **All ADRs accepted as of v0.12**: ADR-001..041 ACCEPTED. No PROPOSED ADRs remain.
 - **v0.13 (2026-05-02)** — methodology-amendment batch. Added ADR-042 (session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point) — drafted PROPOSED then ACCEPTED same-session per established pattern; extends ADR-026 by operationalising the L0 layer with a static manual-baseline implementation (a project-root markdown file the harness auto-loads). First instance lands as [`CLAUDE.md`](../../CLAUDE.md). Companion edits in this batch: [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) extended to identify the bootstrap-file pattern as the manual L0 baseline; [CONTEXT_INVENTORY §1](../../CONTEXT_INVENTORY.md) gains a "0. Bootstrap" row for `CLAUDE.md` and §7 file-layout updated; [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) Amendment v0.3 records paper-section guidance for the next iteration of `cognitive_cartography.tex`. **All ADRs accepted as of v0.13**: ADR-001..042 ACCEPTED. (Note: ADR-040 + ADR-041 were the most-recent prior IDs; ADR-042 is the next monotonic id.)
+- **v0.14 (2026-05-02)** — Phase 1 strategy switch. Added ADR-043 (Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2)) — drafted PROPOSED then ACCEPTED same-session. Phase 1 strategy is now A3 (TQQQ / TMF / IEF, daily rebalance, T+1 open). ADR-021 (CAC ETF proxy) status flipped ACCEPTED → SUPERSEDED-BY-ADR-043; the CAC.PA Instrument + Yahoo-suffix translation per ADR-041 + DD-7 §3 / §3.1 substrate stay durable (CAC.PA is wire-validated end-to-end at `M2-IB.4a-happy-cacpa` and may revive as a future strategy / comparison instrument). NAV slice unchanged at 5–10% per ADR-020. A2 (`tkan_v4_momentum_timing`) — code stays in repo, marked DEFERRED-NO-TARGET in INV-1 / KB-5. Companion ADRs (044 multi-instrument pipeline, 045 LongShortPortfolio dispatch, 046 IB SMART for US equities) follow in the next commit. Substrate updates in this batch: KB-5 §7 phased priority reordered, INV-1 A2/A3 phase columns swapped, TASK_REGISTRY M2-IB.5 closed at architectural surface + M2-IB.6 scope opened with sub-milestones .6.1 / .6.2 / .6-close, CONTEXT_INVENTORY §10 / status banner updated.

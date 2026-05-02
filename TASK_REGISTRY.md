@@ -3,8 +3,8 @@ id: TASK_REGISTRY
 title: Task Registry — Phase 1 Plan
 status: DRAFT
 owner: Oleg primary, Claude assist
-last_reviewed: 2026-04-28
-version: 0.3
+last_reviewed: 2026-05-02
+version: 0.4
 sources:
   - REQUIREMENTS.md §14
   - KB-5 §7
@@ -35,25 +35,31 @@ Layer-4 Plan artefact (per [CONTEXT_INVENTORY §1](./CONTEXT_INVENTORY.md#1-repr
 
 ## Phase 1 Strategy
 
-[ADR-013](./docs/decisions/DECISIONS.md#adr-013--v1-scope-etf-and-index-strategies-only) selects `tkan_v4_momentum_timing` 1× variant.
+**2026-05-02 amendment**: Per [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2), Phase 1 strategy switched from A2 (`tkan_v4_momentum_timing` on `CAC.PA`) to **A3 — `triple_lev_sma_filter_dsl`** (TQQQ / TMF / IEF). Operator-chosen as the first live-trading candidate after M2-IB.4a fully wire-validated the IB write-side end-to-end against IB Paper for single-instrument flow. ADR-021 (CAC ETF proxy as Phase 1) is now SUPERSEDED-BY-ADR-043; the CAC.PA Instrument substrate (DD-7 §3 / §3.1 + ADR-041 Yahoo-suffix translation + the M2-IB.4a-happy-cacpa wire validation) stays durable but no longer holds the Phase 1 strategy designation.
+
+The original ADR-013 selection (`tkan_v4_momentum_timing` 1× variant) is **DEFERRED-NO-TARGET**; the A2 code stays in repo (`blive.runtime.paper_pipeline`, `SingleAssetRunner` dispatch via ADR-030, tests) and revives whenever an A2-style timing strategy returns to scope.
 
 **2026-04-28 amendment**: M2 history:
 
 - **M2-IG path** (operator-driven IG demo bridge while IB Paper was unavailable) — **CLOSED at architectural surface 2026-04-28**. Sub-milestones .1 substrate / .2 cross-cutting infra / .3 read side / .4 minimum-viable submit shipped (7 tags placed; 359 tests; ADR-030/033/034..039 ACCEPTED). Sub-milestone .5 strategy run + production Lightstreamer wrapper DEFERRED (operator pivoted to M2-IB resumption when the IB Paper account became available). See [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md). The IG-specific code (5 modules + Lightstreamer abstraction + KB-16/17 + DD-8) is preserved in repo for future bridge revival; no scheduled revival.
 - **M2-IB path** (canonical Phase 1) — **ACTIVE 2026-04-28**. IB Paper account commissioned 2026-04-28; enabled 2026-04-29. Resumes from the [`M2-substrate-IB.checkpoint`](./docs/decisions/DECISIONS.md) commit. Architecturally scaffolded by the M2-IG cross-cutting work (broker registry, shared rate limiter, shared credentials, `Instrument.tradability` field) — IB read+write modules mirror IG's file structure 1:1 per RETRO-M2-IG §"Recommendations".
 
-Phase 1 specifics (canonical M2-IB path; M2-IG bridge variant **ARCHIVED**):
+Phase 1 specifics (canonical M2-IB.6 path per [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2); CAC.PA / A2 path superseded; M2-IG bridge variant ARCHIVED):
 
-| Specifier | M2-IB path (ACTIVE) | M2-IG bridge variant (ARCHIVED) | Source |
-|-----------|---------------------|----------------------------------|--------|
-| Tradable instrument | `CAC.PA` (Lyxor CAC 40 UCITS ETF, XPAR) | CAC 40 cash CFD on IG (epic TBD if revived) | [ADR-021](./docs/decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) / [ADR-039](./docs/decisions/DECISIONS.md#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) (bridge-paused; ACCEPTED but not the canonical Phase 1 strategy) |
-| Tradability | `spot` (ETF shares; ADR-027 integer-share rounding) | `cfd` (fractional contracts) | [ADR-037](./docs/decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet) |
-| NAV slice | 5–10% of total account, hard cap 10% | same | [ADR-020](./docs/decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10) |
-| TKAN freshness window | 30d hard (RC-12 block); 21d warning | same | [ADR-022](./docs/decisions/DECISIONS.md#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning) |
-| TKAN artefact path | `~/.blive/artefacts/{strategy_id}/{model_name}/pred_cache.pkl` | same | [ADR-023](./docs/decisions/DECISIONS.md#adr-023--tkan-artefact-path-and-refresh-ownership) |
-| TKAN refresh | manual via `scripts/refresh_artefact.py` (M2-IB.4 deliverable) | same script (broker-agnostic) | ADR-023 |
-| Parity envelope | ±1 bps target (G2-IB / G3-IB) | (CFD-specific envelope, not exercised) | ADR-021 / ADR-039 |
-| Credentials | `~/.blive/secrets/ib.env` (host/port/clientId/account_id only — IB Gateway + IBC handle username/password) | (would have been `~/.blive/secrets/ig.env` if revived) | [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) |
+| Specifier | M2-IB.6 path (ACTIVE) | M2-IB.5 / CAC.PA path (SUPERSEDED — substrate durable) | Source |
+|-----------|------------------------|---------------------------------------------------------|--------|
+| Strategy | `triple_lev_sma_filter_dsl` (A3 archetype) | `tkan_v4_momentum_timing` 1× (A2 archetype, DEFERRED-NO-TARGET) | [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) |
+| Tradable instruments | TQQQ + TMF + IEF (US ETFs on NASDAQ / NYSE) | `CAC.PA` (Lyxor CAC 40 UCITS ETF, XPAR — wire-validated `M2-IB.4a-happy-cacpa`) | ADR-043 / ADR-021 (SUPERSEDED) |
+| Trend signals | QQQ closes (TQQQ filter) + TLT closes (TMF filter); SMA-200 with 5% hysteresis re-entry | TKAN `pred_cache.pkl` ML predictions | ADR-043 / ADR-022 (TKAN, deferred) |
+| Universe size | 3 instruments (multi-instrument pipeline per [ADR-044](./docs/decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043)) | 1 instrument (single-instrument pipeline per `run_paper_pipeline` / `run_ib_pipeline`) | ADR-044 |
+| btest dispatch | `LongShortPortfolio` → `compute_target_weights_for_date()` per [ADR-045](./docs/decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) | `TimingPortfolio` → `SingleAssetRunner` per [ADR-030](./docs/decisions/DECISIONS.md#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) | ADR-045 / ADR-030 |
+| Tradability | `spot` (ETF shares; [ADR-027](./docs/decisions/DECISIONS.md#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) integer-share rounding) | `spot` (ETF shares) | [ADR-037](./docs/decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet) |
+| Routing | SMART with primary-exchange hint per [ADR-046](./docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) (XNAS → SMART/NASDAQ; XNYS → SMART/NYSE) | Direct-routed to SBF (with API → Precautions bypass) | ADR-046 / ADR-032 |
+| NAV slice | 5–10% of total account, hard cap 10% (unchanged) | same | [ADR-020](./docs/decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10) |
+| Rebalance | Daily (T+1 open via `signal_delay_bars=1`) — DSL form. v1-style bimonthly is a future operational refinement (operator-noted "smart rebalance"). | Daily close | strategy spec |
+| Parity envelope | TBD per [OQ-012](./docs/decisions/OPEN_QUESTIONS.md#oq-012--parity-tolerance-bands-are-8-numbers-right) — leveraged-ETF financing parity per [KB-6 §4](./docs/kb/cost_margin_dictionary.md) becomes load-bearing earlier than under A2 | ±1 bps target (deferred with A2) | ADR-043 |
+| Credentials | `~/.blive/secrets/ib.env` (unchanged) | same | [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) |
+| Operator-side prereqs | EODHD subscription (active), no IB market-data subscription needed (US ETF historical via EODHD per [ADR-017](./docs/decisions/DECISIONS.md#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing) hybrid routing); IB Paper "Read-Only API" unchecked + "Bypass Order Precautions for API Orders" ticked (per `M2-IB.4a-happy-cacpa`) | SBF historical-data subscription was needed for CAC.PA; **no longer needed** (A3 uses US ETFs which IB Paper provides without paid tier for delayed daily) | ADR-043 follow-ups |
 
 ---
 
@@ -221,6 +227,49 @@ The IG-specific code (modules under `blive/adapters/ig/`, KB-16, KB-17, DD-8, AD
 
 ---
 
+### M2-IB.6 — A3 strategy paper-test on IB Paper (`triple_lev_sma_filter_dsl` on TQQQ/TMF/IEF) — **ACTIVE 2026-05-02**
+
+**Status:** ACTIVE. Replaces the original M2-IB.5 strategy-run scope (which was for A2 / `tkan_v4_momentum_timing` on `CAC.PA`) per [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2). M2-IB.5 closes at architectural surface 2026-05-02 — the single-instrument pipeline + IB write-side wire validation (across `M2-IB.4a-rejected`, `M2-IB.4a-happy`, `M2-IB.4a-happy-cacpa`, and the 60-bar replay run that produced 35 SUBMITTED → ACCEPTED → CANCELED FSM cycles) are durable substrate but no longer the strategy-run target. CLOSED-EARLY-BY-OPERATOR per the discipline-extension noted in [RETRO-M2-IG §"Recommendations for the discipline itself"](./docs/retros/M2-IG_retrospective.md#recommendations-for-the-discipline-itself).
+
+**Goal:** blive runs `triple_lev_sma_filter_dsl` (A3) end-to-end against IB Paper across the 5-ticker universe (TQQQ + TMF + IEF tradables; QQQ + TLT trend signals from EODHD), exercising the multi-instrument FSM (FILLED + PARTIAL_FILL paths), with the A3 LongShortPortfolio btest dispatch lit up for the first time. Outcome is operationally clean (no rejections, no breaches; FILLED count matches expected regime-flip count).
+
+**Sub-milestones:**
+
+- **M2-IB.6-substrate** — ADRs 043 / 044 / 045 / 046 ACCEPTED + KB-5 §7 / INV-1 / DD-7 §3 amendments. **Lands in this commit batch (2026-05-02).**
+- **M2-IB.6.1 — multi-instrument pipeline + 5-ticker EODHD refresh + LongShortPortfolio dispatch.** Extend `run_ib_pipeline` (or sibling `run_ib_multi_pipeline`) to handle `instruments: list[Instrument]` + `target_weights_series: pd.DataFrame`. Wire btest's `compute_target_weights_for_date()` for `LongShortPortfolio` (per [ADR-045](./docs/decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030); analogous to `SingleAssetRunner` for `TimingPortfolio` per [ADR-030](./docs/decisions/DECISIONS.md#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010)). Extend `scripts/refresh_eodhd_parquet.py` (or new `scripts/refresh_eodhd_signals.py`) to fetch QQQ, TLT, TQQQ, TMF, IEF and produce the wide eligibility-signals parquet matching `triple_lev_sma_eligible.parquet` format. SMART resolver convention codified in `IBInstrumentResolver` per [ADR-046](./docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). Tests against synthetic 3-instrument fixtures.
+- **M2-IB.6.2 — IB Paper end-to-end run during US RTH.** Driver `scripts/run_m2ib6_ib_paper.py`. Run during US session (14:30–21:00 UTC). Validates FILLED + multi-instrument FSM coverage. INV-14 grows with any new error codes observed.
+- **M2-IB.6-close** — `RETRO-M2-IB.md` covering M2-IB.1 → M2-IB.6. `NEXT_PROMPT.md` v0.6 → Phase 2 readiness audit per [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md) phase-boundary protocol.
+
+**Deliverables:**
+
+1. **ADRs 043 / 044 / 045 / 046 ACCEPTED** in `docs/decisions/DECISIONS.md`. Substrate amendments to KB-5 §7, INV-1, DD-7 §3 (US ETF venues + SMART convention). **(M2-IB.6-substrate)**
+2. **Multi-instrument `run_ib_pipeline` (or new `run_ib_multi_pipeline`)** — `instruments: list[Instrument]`, `target_weights_series: pd.DataFrame[bar_close → ticker → float]`, returns `IBRunResult` widened to per-instrument fill / cash / position breakdown. Tests against synthetic 3-instrument fixtures. **(M2-IB.6.1)**
+3. **EODHD 5-ticker refresh** — fetches QQQ + TLT + TQQQ + TMF + IEF. Produces (a) 5 separate `~/.blive/data/eodhd/{ticker}_1d.parquet` files in PaperMarketData format (for the tradables) + (b) a wide eligibility-signals parquet at `~/.blive/data/signals/triple_lev_sma_eligible.parquet` matching the format btest's `ExternalFactor(per_instrument=True)` consumes. **(M2-IB.6.1)**
+4. **LongShortPortfolio btest dispatch wired** — pipeline detects `strategy.portfolio` type and dispatches to `compute_target_weights_for_date()` for LongShortPortfolio (in addition to the existing TimingPortfolio → SingleAssetRunner path). **(M2-IB.6.1)**
+5. **`IBInstrumentResolver` SMART convention codified for US equities** — XNAS / XNYS / ARCX / BATS spot equities now route via `exchange="SMART"` with `primaryExchange` set per the §3 table. The probe-local `_SmartUsResolver` in `scripts/probe_ib_submit.py` is the prototype; production code lives in the resolver itself. **(M2-IB.6.1, per ADR-046)**
+6. **`scripts/run_m2ib6_ib_paper.py`** — multi-instrument analogue of `run_m2ib5_paper.py`. Wires IBBroker + multi-instrument PaperMarketData (via 5 fixtures) + the LongShortPortfolio dispatch + the SMA-eligibility signal source + `run_ib_pipeline`. **(M2-IB.6.2)**
+7. **Wire run during US RTH** — operator-driven; validates FILLED end-to-end. Output: IBRunResult summary with non-zero `fills_count`, zero `rejected`, zero `breaches`, equity curve with cash debits / credits matching observed fills. **(M2-IB.6.2)**
+8. **`RETRO-M2-IB.md`** — frozen retrospective covering the M2-IB.1 → M2-IB.6 ladder. Captures: gate status; delivered-vs-plan across the full M2-IB tag chain; surprises (10311 framing flip-flop, post-acceptance disambiguation bug + fix, A3 strategy-switch reflection, multi-instrument pipeline learnings); ADRs raised (042, 043, 044, 045, 046); substrate transitions. **(M2-IB.6-close)**
+9. **`NEXT_PROMPT.md` v0.6** — targets the Phase 2 readiness audit session per [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md). **(M2-IB.6-close)**
+
+**Substrate transitions:** ADR-021 ACCEPTED → SUPERSEDED-BY-ADR-043 (this commit batch). KB-5 §7 phased priority reordered. INV-1 v0.1 → v0.2 (A2 / A3 phase columns swapped). DD-7 §3 grows US ETF venues + SMART convention (next commit). KB-10 v0.13 → v0.14 then → v0.15 with the second commit. INV-14 grows with any new IB error codes observed at M2-IB.6.2. KB-2 / KB-3 STABLE flip pending — the remaining §3-§9 surfaces (TIFs, IB algos, market-data tier handling for US ETFs) get exercised at M2-IB.6.2 / .6-close.
+
+**Exit criteria (G3-IB-A3 gate — supersedes G3-IB):**
+
+1. blive connects to IB Paper Gateway within 5s (already validated; should not regress).
+2. SMART-routed orders for TQQQ / TMF / IEF reach ACCEPTED on the wire (no 10311 / direct-routing precaution; SMART avoids it per ADR-046).
+3. At least one BUY-then-SELL round trip per regime flip exercises FILLED — the previously-unexercised wire path. Target: ≥ 2 round trips total across the run window.
+4. Multi-instrument target_weights_series correctly drives per-instrument orders; no cross-instrument confusion.
+5. RiskEngine clean — zero breaches across the run.
+6. INV-14 grows with US-side codes if any are observed (typical paper-account codes for US equities are scarce; the M2-IB.4a-* runs already covered the most common ones).
+7. `RETRO-M2-IB.md` written per [`docs/retros/_template.md`](./docs/retros/_template.md).
+
+**Estimated effort:** ~3–4 sessions across M2-IB.6-substrate (this commit batch) + M2-IB.6.1 (~1–2) + M2-IB.6.2 (~1) + M2-IB.6-close (~1).
+
+**Dependencies:** M2-IB.4a-happy-cacpa complete (✓); M2-IB.5 architectural-surface validated (✓); operator-side IB Paper "Read-Only API" unchecked + "Bypass Order Precautions for API Orders" ticked (✓ at last check 2026-05-02).
+
+---
+
 ### M3 — IB Adapter (Write Side) & First Live (Paper) Strategy
 
 **Goal:** `tkan_v4_momentum_timing` 1× submits real orders to IB Paper through blive; FSM transitions are driven by IB events; first live (paper) strategy run on a regulated venue.
@@ -339,3 +388,4 @@ Items still requiring Oleg's input or action:
 - **v0.1.3 (2026-04-27)** — **M1 closed; G2 gate PARTIAL.** All seven M1 deliverables landed (smoke-import, strategy loader, btest engine wiring via `SingleAssetRunner` per OQ-030, Sizer with ADR-027 rounding, RiskEngine M1-subset RC-08/09/12/13, paper-mode pipeline, DD-3 DRAFT). Plus PaperMarketData / LogAlert / PaperBroker.replace / RiskBreach domain-event relocation. ADR-027..029 ACCEPTED; OQ-030 raised; INV-5/INV-6 promoted to STABLE. 175 tests green; mypy strict clean; both contracts KEPT. See [RETRO-M1](./docs/retros/M1_retrospective.md). G2 ±1 bps real-data parity run is operator-deferred (needs EODHD CAC.PA fixture + TKAN artefact + momentum factor). M2 begins after G2 closure — see [NEXT_PROMPT.md](./NEXT_PROMPT.md) v0.3.
 - **v0.2 (2026-04-27)** — **M2 split into M2-IB (PARKED) and M2-IG (ACTIVE)** per option (S) of operator-driven IG-demo-bridge pivot. Substrate authored: cross-cutting [ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) (multi-broker registry pattern; extends ADR-004) and [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) (secrets handling discipline; ~/.blive/secrets/{broker}.env + redaction list) — both PROPOSED; first-batch IG-bridge substrate. Phase 1 specifics table grew an "M2-IG bridge path" column (CAC 40 CFD on IG demo; ADR-021 PAUSED for the bridge). Quality Gates table split G3 → G3-IB (DEFERRED) + G3-IG (ACTIVE). Risk register grew IG-specific rows. Open dependencies cleaned up for IG bridge. M2-IG sub-milestones .1 (substrate) / .2 (cross-cutting infra) / .3 (read side) / .4 (write side) / .5 (strategy run + retro) defined.
 - **v0.3 (2026-04-28)** — **M2-IG bridge CLOSED at architectural surface; M2-IB UNPARKED to ACTIVE.** Operator pivot: IB Paper account commissioned 2026-04-28 (enabled 2026-04-29). [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md) STABLE-on-first-write captures the bridge close: ~2 sessions delivered M2-IG.1 substrate + M2-IG.2 cross-cutting infra + M2-IG.3 read side + M2-IG.4 minimum-viable submit (7 tags placed; 359 tests). M2-IG.5 strategy run + production Lightstreamer wrapper DEFERRED with no scheduled revival. M2-IB resumption defined with sub-milestones M2-IB.1 (substrate verification) / .2 (IBClient + IBCredentials) / .3 (IBInstrumentResolver + read side + IBMarketData) / .4 (write side + reconciliation) / .5 (strategy run on IB Paper + RETRO-M2-IB). M2-IG section relabelled ARCHIVED (G3-IG NOT_REACHED, operator-driven close not gate failure). Phase 1 specifics table reverts to ADR-021 ETF path as canonical; ADR-039 CFD variant stays ACCEPTED but bridge-paused. Quality Gates: G3-IB ACTIVE; G3-IG NOT_REACHED. Risk register: IG-specific rows archived; IB-specific rows reasserted. Open dependencies updated: IG operator-side items closed; IB connection params + deployment target + first IB Gateway handshake opened. NEXT_PROMPT.md v0.4 drafted to target M2-IB.
+- **v0.4 (2026-05-02)** — **Phase 1 strategy switch per [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2): A3 (`triple_lev_sma_filter_dsl` on TQQQ/TMF/IEF) replaces A2 (`tkan_v4_momentum_timing` on CAC.PA).** ADR-021 SUPERSEDED-BY-ADR-043. M2-IB.5 closed at architectural surface 2026-05-02 (CLOSED-EARLY-BY-OPERATOR; the 60-bar replay validated the single-instrument pipeline + IB write-side wire across the M2-IB.4a-* tag chain — durable substrate, but no longer the strategy-run target). New milestone **M2-IB.6** opens with sub-milestones .6-substrate (this commit batch) / .6.1 (multi-instrument pipeline + 5-ticker EODHD refresh + LongShortPortfolio btest dispatch + IB SMART resolver convention) / .6.2 (IB Paper end-to-end run during US RTH for FILLED validation) / .6-close (RETRO-M2-IB + NEXT_PROMPT.md v0.6 targeting Phase 2 readiness audit per CONTEXT_PROTOCOL §8.3.2 phase-boundary protocol). Phase 1 specifics table rewritten to reflect the A3 path (5-ticker universe, SMART routing, LongShortPortfolio dispatch, EODHD-only data per ADR-017 hybrid routing — no IB market-data subscription needed for US ETFs at delayed-daily tier). G3-IB superseded by G3-IB-A3 (criteria amended for multi-instrument FSM + FILLED validation). New ADRs (companion): ADR-044 multi-instrument pipeline, ADR-045 LongShortPortfolio dispatch, ADR-046 IB SMART for US equities — all ACCEPTED in the next commit. A2 (`tkan_v4_momentum_timing`) marked DEFERRED-NO-TARGET; code stays in repo. KB-5 §7 phased priority reordered. INV-1 v0.1 → v0.2.

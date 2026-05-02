@@ -215,20 +215,19 @@ The strategy's `DataConfig.source` URL therefore differs between btest research 
 
 [OQ-013](../decisions/OPEN_QUESTIONS.md#oq-013--which-strategies-are-funded-for-v1-and-what-nav-slice) resolved 2026-04-26: **v1 focus is ETF and index strategies only**; A1 single-name cross-sectional strategies deferred to post-M8.
 
-**Resolved phased priority** (ADR-013 pending in KB-10):
+**Resolved phased priority** (per [ADR-013](../decisions/DECISIONS.md#adr-013--v1-scope-etf-and-index-strategies-only) + [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) reorder of 2026-05-02):
 
-- **Phase 1 (M3 IB Paper)**: A2 simplest — `tkan_v4_momentum_timing` 1× variant via a tradable ETF proxy (CACX.PA, Amundi `CAC.PA`, or equivalent — see OQ-014 resolution and KB-5 §6 for live data routing). Single instrument, simplest parity diagnostic.
-- **Phase 2 (post-M5)**: A3 — `triple_lev_sma_filter_dsl` (TQQQ / TMF / IEF). Multi-instrument US-only; first paired-leg rebalance under live conditions.
-- **Phase 3 (post-M7)**: A1a — `lagging_indecies` via index ETF proxies (SPY, EFA, EWJ, EWG, EWU, IEMG). Multi-currency, multi-calendar. Engine first proves cross-venue under live.
+- **Phase 1 (M2-IB.6, IB Paper → live cutover candidate)**: **A3 — `triple_lev_sma_filter_dsl`** (TQQQ / TMF / IEF). Per [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2): operator-chosen as the first live-trading candidate. Multi-instrument (3 ETFs, all US-listed on NASDAQ / NYSE), daily rebalance with T+1 open execution, per-leg SMA-200 trend filter with 5% hysteresis re-entry, 50/50 weighting between the two risk-on legs (TQQQ / TMF) with IEF as the safe-haven park whenever any leg is filtered out. CAC.PA + the M2-IB.4a wire-validation chain becomes durable substrate (DD-7 §3 / §3.1, ADR-041) but is no longer the Phase 1 strategy designation.
+- **Phase 2 (post-Phase-1 live or post-M5)**: A1a — `lagging_indecies` via index ETF proxies (SPY, EFA, EWJ, EWG, EWU, IEMG). Multi-currency, multi-calendar. Engine first proves cross-venue under live.
+- **Phase 3 (post-M7)**: A3 generalised to additional leveraged-ETF pairs (SOXL/SQQQ, UPRO/SPXU, sector rotations) per OQ-022 resolution. The Phase 1 A3 instance proves the multi-instrument + leveraged-ETF path; Phase 3 widens it.
 - **Phase 4+ (post-M8 live, in any order pending observed performance)**:
-  - A2 leveraged variants (`tkan_v4_momentum_timing` 2×) — exercises both leverage paths (margin and leveraged-ETF instrument) per OQ-016 resolution.
-  - A3 generalised to additional leveraged-ETF pairs (SOXL/SQQQ, UPRO/SPXU, sector rotations) per OQ-022 resolution.
+  - **A2 — `tkan_v4_momentum_timing`** (DEFERRED-NO-TARGET as of [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2); code stays in `blive.runtime.paper_pipeline` + `SingleAssetRunner` dispatch via [ADR-030](../decisions/DECISIONS.md#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010); revives whenever an A2-style timing strategy returns to scope). 1× and 2× variants both available via `target_leverage`.
   - UK equity strategies (per OQ-021 resolution) — likely a UK-only A1 cross-sectional from `equities/smim/UK-LC`.
   - Reconsider A1 single-name SP500 strategies if appetite remains.
 
-Design intent of the phasing: **complexity ramps A2 → A3 → A1a so the engine learns to fill, reconcile, and risk-check on simple flows before tackling multi-venue or many-name rebalances.** A1 single-name is the highest-friction archetype and is deliberately parked behind M8.
+Design intent of the original phasing was **complexity ramps A2 → A3 → A1a so the engine learns to fill, reconcile, and risk-check on simple flows before tackling multi-venue or many-name rebalances.** ADR-043 reorders this — operator-chosen pull-forward of A3 to Phase 1 because A3 is the first live-trading candidate; the simpler-A2-validation step is skipped, accepting the higher-stakes complexity surface. A1 single-name remains parked behind M8.
 
-NAV slice per phase is **not yet decided**; leave as a follow-up entry on OQ-013 when first capital is committed.
+NAV slice for Phase 1 = 5–10% of total NAV per [ADR-020](../decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10), unchanged across the ADR-043 reorder. The strategy's internal 3× leverage on TQQQ / TMF is *strategy-internal exposure*, distinct from the engine-level NAV slice.
 
 ## 8. Live-Lift Implications for blive (REQUIREMENTS hooks)
 
