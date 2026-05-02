@@ -1,9 +1,19 @@
 """IB write-side smoke test.
 
-Submits a tiny LMT BUY for 1 share of AAPL on SMART/NASDAQ at $1.00
-(well below market — won't fill in normal conditions), waits for
-SUBMITTED + (ACCEPTED or REJECTED), then cancels (only if ACCEPTED was
-observed).
+Default test submits a tiny LMT BUY for 1 share of CAC.PA on XPAR/SBF at
+EUR 1.00 (well below market — won't fill in normal conditions), waits
+for SUBMITTED + (ACCEPTED or REJECTED), then cancels (only if ACCEPTED
+was observed). When run outside RTH for SBF, IB pushes warning 399 and
+holds the order until next session open — the broker correctly emits
+ACCEPTED and a subsequent engine cancel produces CANCELED with
+reason='engine'.
+
+A second test path (`_TEST_INSTRUMENT` = AAPL on SMART/NASDAQ) is
+available as a fallback for environments where the IB Paper account's
+"Direct Routed Orders" restriction (error 10311) hasn't been bypassed
+via API → Precautions. SMART routing sidesteps the restriction; swap
+`instrument=_PHASE_1_INSTRUMENT` to `instrument=_TEST_INSTRUMENT` in
+`_run_probe()` to switch.
 
 Validates the M2-IB.4a write-side wiring end-to-end against IB Paper:
 
@@ -261,7 +271,7 @@ async def _run_probe() -> int:
     order = Order(
         client_order_id=cid,
         strategy_id="probe",
-        instrument=_TEST_INSTRUMENT,
+        instrument=_PHASE_1_INSTRUMENT,
         side=OrderSide.BUY,
         quantity=Decimal("1"),
         order_type=OrderType.LMT,

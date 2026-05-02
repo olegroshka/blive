@@ -989,6 +989,59 @@ async def test_submit_emits_rejected_when_cancelled_with_error_code_no_message(
     assert event.reason == "ib:322"
 
 
+async def test_submit_emits_canceled_when_cancelled_post_acceptance_with_warning_in_log(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Once the order has reached ACCEPTED, a subsequent Cancelled with a
+    non-zero errorCode in the log (e.g., warning 399 "order will not be
+    placed until next session open") is a normal CANCELED, not REJECTED.
+
+    Observed at M2-IB.4a-happy-cacpa wire probe (2026-05-02): IB pushed
+    Submitted (→ ACCEPTED) for a CAC.PA LMT held until Monday open, with
+    a warning 399 entry already in trade.log; engine-initiated cancel
+    afterward should produce CANCELED reason='engine', not REJECTED."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    cid = await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    # IB pushes Submitted → broker emits ACCEPTED.
+    fake_trade.orderStatus.status = "Submitted"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+    accepted = await events_iter.__anext__()
+    assert accepted.kind == OrderEventKind.ACCEPTED
+
+    # An IB warning is sitting in the trade log (e.g., order held until
+    # next session) — non-zero errorCode but informational, not a rejection.
+    log_entry = MagicMock()
+    log_entry.errorCode = 399
+    log_entry.message = "Warning 399: Order held until next session open."
+    fake_trade.log = [log_entry]
+
+    # Operator cancels.
+    await broker.cancel(cid)
+    mock_ib.cancelOrder.assert_called_once_with(fake_trade.order)
+
+    # IB pushes Cancelled. Disambiguation: tracking.accepted_emitted is True,
+    # so the warning in the log is contextual — emit CANCELED, not REJECTED.
+    fake_trade.orderStatus.status = "Cancelled"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.CANCELED
+    assert event.reason == "engine"
+
+
 async def test_submit_consumes_global_token(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,

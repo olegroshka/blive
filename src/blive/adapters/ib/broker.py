@@ -607,13 +607,19 @@ class IBBroker:
             )
         elif status in _CANCELLED_STATUSES:
             tracking.terminal_emitted = True
-            # IB uses status="Cancelled" both for user-initiated cancels
-            # AND for system rejections (e.g., risk precautions, direct
-            # routing blocks like error 10311). Disambiguate via the
-            # trade log: any TradeLogEntry with non-zero errorCode means
-            # IB rejected — emit REJECTED per INV-13 §5; otherwise emit
-            # CANCELED.
-            error_log = _last_error_log_entry(trade)
+            # IB uses status="Cancelled" for several distinct semantic cases:
+            #   1. Pre-acceptance system rejections (risk precautions,
+            #      direct-routing blocks like error 10311) — REJECTED.
+            #   2. Post-acceptance engine-initiated cancels — CANCELED.
+            # The discriminator is `tracking.accepted_emitted`: if the order
+            # never reached ACCEPTED, a non-zero errorCode in the trade log
+            # is the rejection signal. Once ACCEPTED has been emitted, any
+            # errorCode in the log is contextual (e.g., warning 399 "order
+            # held until next session open") and the Cancelled status is
+            # an ordinary cancel — CANCELED per INV-13 §5.
+            # See INV-14 for the catalogued codes; the pre-acceptance
+            # disambiguation was the original M2-IB.4a-rejected motivation.
+            error_log = _last_error_log_entry(trade) if not tracking.accepted_emitted else None
             if error_log is not None:
                 reason = _rejected_reason_from_log_entry(error_log)
                 kind = OrderEventKind.REJECTED
