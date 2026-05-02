@@ -280,12 +280,12 @@ async def _run(args: argparse.Namespace) -> int:
         # would cut the SMA's history too).
         capped_bars = bars[-args.max_bars :]
         print(
-            f"  capping bars: using last {args.max_bars} of {len(bars)} ({capped_bars[0].close_time_utc.date()} → {capped_bars[-1].close_time_utc.date()})"
+            f"  capping bars: using last {args.max_bars} of {len(bars)} ({capped_bars[0].close_time_utc.date()} -> {capped_bars[-1].close_time_utc.date()})"
         )
     else:
         capped_bars = bars
         print(
-            f"  bars: {len(bars)} ({bars[0].close_time_utc.date()} → {bars[-1].close_time_utc.date()})"
+            f"  bars: {len(bars)} ({bars[0].close_time_utc.date()} -> {bars[-1].close_time_utc.date()})"
         )
 
     # Compute the SMA stub signal over the *full* bar set (so the SMA
