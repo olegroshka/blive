@@ -37,9 +37,11 @@ from blive.adapters.shared.rate_limiter import (
     RateLimitConfig,
     TokenBucketRateLimiter,
 )
-from blive.domain.events import AccountUpdate, ConnectionStatus
+from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.types import (
     AssetClass,
+    Order,
+    OrderEventKind,
     OrderSide,
     OrderType,
     TimeInForce,
@@ -614,43 +616,472 @@ async def test_open_orders_requires_connect(
 # --- write methods (M2-IB.4) ------------------------------------------------
 
 
-async def test_submit_raises_not_implemented(
-    credentials: IBCredentials,
-    rate_limiter: TokenBucketRateLimiter,
-    clock: SimClock,
-) -> None:
-    """Write methods raise pending M2-IB.4. Error mentions Read-Only API
-    checkbox so the operator knows what to fix in Gateway too."""
+# --- write side: submit / cancel / replace (M2-IB.4a) ----------------------
+
+
+def _build_order(
+    *,
+    order_type: OrderType = OrderType.LMT,
+    side: OrderSide = OrderSide.BUY,
+    quantity: Decimal = Decimal("1"),
+    limit_price: Decimal | None = Decimal("1.00"),
+    stop_price: Decimal | None = None,
+    tif: TimeInForce = TimeInForce.DAY,
+) -> "Order":
+    """Build a CAC.PA test order. Defaults to a tiny LMT BUY at €1
+    (well below market — won't fill in live testing)."""
     from uuid import uuid4
 
     from blive.domain.types import ClientOrderId, Instrument, Order
 
-    broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
-    order = Order(
+    return Order(
         client_order_id=ClientOrderId(uuid4()),
         strategy_id="test",
         instrument=Instrument(
-            symbol="CAC",
+            symbol="CAC.PA",
             venue="XPAR",
             currency="EUR",
             asset_class=AssetClass.ETF,
             multiplier=Decimal("1"),
         ),
-        side=OrderSide.BUY,
-        quantity=Decimal("10"),
-        order_type=OrderType.MKT,
-        time_in_force=TimeInForce.DAY,
-        limit_price=None,
-        stop_price=None,
+        side=side,
+        quantity=quantity,
+        order_type=order_type,
+        time_in_force=tif,
+        limit_price=limit_price,
+        stop_price=stop_price,
         parent_id=None,
         tags={},
         created_at=datetime(2026, 5, 1, 14, 0, 0, tzinfo=timezone.utc),
     )
-    with pytest.raises(NotImplementedError, match="M2-IB.4"):
+
+
+def _make_mock_trade(
+    *,
+    order: ib_async.Order,
+    contract: ib_async.Contract | None = None,
+) -> MagicMock:
+    """Build a fake ``ib_async.Trade`` with eventkit Events for the per-trade
+    surface that IBBroker wires."""
+    if contract is None:
+        contract = ib_async.Contract(symbol="CAC", secType="STK", exchange="SBF", currency="EUR")
+    trade = MagicMock(spec=ib_async.Trade)
+    trade.contract = contract
+    trade.order = order
+    # IB assigns an integer orderId on submission; mock a realistic value.
+    trade.order.orderId = 100
+    trade.order.permId = 1234567
+    trade.orderStatus = MagicMock(spec=ib_async.OrderStatus)
+    trade.orderStatus.status = "PendingSubmit"
+    trade.orderStatus.whyHeld = ""
+    trade.log = []
+    trade.fills = []
+    trade.statusEvent = eventkit.Event()
+    trade.fillEvent = eventkit.Event()
+    trade.commissionReportEvent = eventkit.Event()
+    return trade
+
+
+async def test_submit_market_order_emits_submitted_immediately(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """submit() emits SUBMITTED on the events queue right after
+    ib.placeOrder returns. ACCEPTED arrives later via statusEvent."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.MarketOrder("BUY", 1))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # drain ConnectionStatus
+
+    order = _build_order(order_type=OrderType.MKT, limit_price=None)
+    cid = await broker.submit(order)
+
+    assert cid == order.client_order_id
+    event = await events_iter.__anext__()
+    assert isinstance(event, OrderEvent)
+    assert event.kind == OrderEventKind.SUBMITTED
+    assert event.client_order_id == order.client_order_id
+    assert event.venue_order_id == "100"
+    # placeOrder was called with the resolved Contract + an ib_async order
+    # carrying orderRef = client_order_id.
+    place_args = mock_ib.placeOrder.call_args
+    assert place_args.args[1].orderRef == str(order.client_order_id)
+
+
+async def test_submit_lmt_order_emits_accepted_on_status_submitted(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ACCEPTED emitted when IB pushes orderStatus 'Submitted' (or
+    'PreSubmitted' for held orders)."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    order = _build_order(order_type=OrderType.LMT, limit_price=Decimal("1.00"))
+    await broker.submit(order)
+    await events_iter.__anext__()  # SUBMITTED
+
+    # Simulate IB pushing orderStatus 'Submitted'.
+    fake_trade.orderStatus.status = "Submitted"
+    fake_trade.statusEvent.emit(fake_trade)
+    # Allow the asyncio.create_task in the handler to run.
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert isinstance(event, OrderEvent)
+    assert event.kind == OrderEventKind.ACCEPTED
+
+
+async def test_submit_does_not_double_emit_accepted(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """IB sometimes pushes 'Submitted' multiple times (re-acks); blive
+    emits ACCEPTED only on the first occurrence."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    fake_trade.orderStatus.status = "Submitted"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+    await events_iter.__anext__()  # ACCEPTED (1st)
+
+    # Re-emit the same status — should NOT produce a second ACCEPTED.
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_submit_emits_filled_on_fill_completing_quantity(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """When fillEvent fires with shares == total_quantity, emit FILLED
+    with a Fill payload carrying price + qty + commission."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 10, 78.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    order = _build_order(quantity=Decimal("10"), limit_price=Decimal("78.00"))
+    await broker.submit(order)
+    await events_iter.__anext__()  # SUBMITTED
+
+    # Fire fillEvent with full quantity.
+    execution = MagicMock(spec=ib_async.Execution)
+    execution.execId = "exec-1"
+    execution.shares = Decimal("10")
+    execution.price = 78.0
+    execution.time = datetime(2026, 5, 1, 14, 5, tzinfo=timezone.utc)
+    commission_report = MagicMock(spec=ib_async.CommissionReport)
+    commission_report.commission = 0.5
+    commission_report.currency = "EUR"
+    fill = MagicMock(spec=ib_async.Fill)
+    fill.execution = execution
+    fill.commissionReport = commission_report
+    fake_trade.fillEvent.emit(fake_trade, fill)
+    await asyncio.sleep(0)
+
+    # First event after SUBMITTED is ACCEPTED (auto-emitted by fill handler
+    # when statusEvent didn't fire first).
+    e1 = await events_iter.__anext__()
+    assert e1.kind == OrderEventKind.ACCEPTED
+    e2 = await events_iter.__anext__()
+    assert e2.kind == OrderEventKind.FILLED
+    assert e2.fill is not None
+    assert e2.fill.quantity == Decimal("10")
+    assert e2.fill.price == Decimal("78.0")
+    assert e2.fill.commission == Decimal("0.5")
+    assert e2.fill.venue_exec_id == "exec-1"
+
+
+async def test_submit_dedupes_by_exec_id(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """IB occasionally re-pushes execDetails on reconnect — INV-13 §6
+    idempotency: dedupe by venue_exec_id."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 10, 78.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()
+    await broker.submit(_build_order(quantity=Decimal("10"), limit_price=Decimal("78")))
+    await events_iter.__anext__()  # SUBMITTED
+
+    execution = MagicMock(spec=ib_async.Execution)
+    execution.execId = "exec-1"
+    execution.shares = Decimal("10")
+    execution.price = 78.0
+    execution.time = datetime(2026, 5, 1, 14, 5, tzinfo=timezone.utc)
+    fill = MagicMock(spec=ib_async.Fill)
+    fill.execution = execution
+    fill.commissionReport = None  # no commission yet
+    fake_trade.fillEvent.emit(fake_trade, fill)
+    await asyncio.sleep(0)
+    await events_iter.__anext__()  # ACCEPTED
+    await events_iter.__anext__()  # FILLED
+
+    # Re-emit same exec_id — should be deduped.
+    fake_trade.fillEvent.emit(fake_trade, fill)
+    await asyncio.sleep(0)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(events_iter.__anext__(), timeout=0.05)
+
+
+async def test_submit_emits_canceled_on_status_cancelled(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Cancel via cancel() then orderStatus 'Cancelled' fires → CANCELED event."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    order = _build_order()
+    cid = await broker.submit(order)
+    await events_iter.__anext__()  # SUBMITTED
+    fake_trade.orderStatus.status = "Submitted"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+    await events_iter.__anext__()  # ACCEPTED
+
+    # Operator cancels.
+    await broker.cancel(cid)
+    mock_ib.cancelOrder.assert_called_once_with(fake_trade.order)
+
+    # IB pushes Cancelled status.
+    fake_trade.orderStatus.status = "Cancelled"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.CANCELED
+    assert event.reason == "engine"
+
+
+async def test_submit_emits_rejected_on_status_inactive(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """orderStatus 'Inactive' with a whyHeld / log message → REJECTED with reason."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()
+    await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    log_entry = MagicMock()
+    log_entry.message = "Order rejected: insufficient buying power"
+    fake_trade.log = [log_entry]
+    fake_trade.orderStatus.status = "Inactive"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.REJECTED
+    assert "insufficient buying power" in event.reason
+
+
+async def test_submit_emits_rejected_when_cancelled_with_error_code_in_log(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """IB sometimes pushes status="Cancelled" for system rejections (risk
+    precautions, direct-routing blocks like error 10311, dup orderId 322).
+    The trade log carries a non-zero errorCode in those cases; the broker
+    disambiguates to REJECTED with an "ib:{code} {message}" reason per
+    INV-13 §5 + INV-14 (see _last_error_log_entry / _rejected_reason_from_log_entry)."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    # Simulate IB pushing Cancelled with an errorCode entry in the trade log
+    # (system-initiated rejection, not a user cancel). The broker should
+    # disambiguate to REJECTED.
+    log_entry = MagicMock()
+    log_entry.errorCode = 201
+    log_entry.message = "Order rejected - reason: risk precaution block"
+    fake_trade.log = [log_entry]
+    fake_trade.orderStatus.status = "Cancelled"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.REJECTED
+    assert "ib:201" in event.reason
+    assert "risk precaution block" in event.reason
+
+
+async def test_submit_emits_rejected_when_cancelled_with_error_code_no_message(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """If the errored log entry has an empty message, the reason degrades
+    to "ib:{errorCode}" without raising — analytics by code still work."""
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()
+
+    await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    log_entry = MagicMock()
+    log_entry.errorCode = 322
+    log_entry.message = ""
+    fake_trade.log = [log_entry]
+    fake_trade.orderStatus.status = "Cancelled"
+    fake_trade.statusEvent.emit(fake_trade)
+    await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.REJECTED
+    assert event.reason == "ib:322"
+
+
+async def test_submit_consumes_global_token(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    before = rate_limiter.metrics()["global"].available
+    await broker.submit(_build_order())
+    after = rate_limiter.metrics()["global"].available
+    assert after == before - Decimal(1)
+
+
+async def test_submit_unsupported_order_type_raises(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """MOC/LOC/OPG raise NotImplementedError pending v1.1."""
+    broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
+    await broker.connect()
+    order = _build_order(order_type=OrderType.MOC, limit_price=None)
+    with pytest.raises(NotImplementedError, match="MOC"):
         await broker.submit(order)
 
 
-async def test_cancel_raises_not_implemented(
+async def test_submit_lmt_without_limit_price_raises(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """LMT order with limit_price=None can't construct the IB order shape."""
+    # Skip the dataclass invariant by building Order directly with limit_price=None
+    # — actually DD-1 enforces "required iff order_type ∈ {LMT, STP_LMT}", so
+    # constructing such an Order should already fail at the domain level. Verify
+    # that's the case (no IBBroker test needed; the domain catches it first).
+    from uuid import uuid4
+
+    from blive.domain.types import ClientOrderId, Instrument, Order
+
+    with pytest.raises(ValueError):
+        Order(
+            client_order_id=ClientOrderId(uuid4()),
+            strategy_id="test",
+            instrument=Instrument(
+                symbol="CAC.PA",
+                venue="XPAR",
+                currency="EUR",
+                asset_class=AssetClass.ETF,
+                multiplier=Decimal("1"),
+            ),
+            side=OrderSide.BUY,
+            quantity=Decimal("1"),
+            order_type=OrderType.LMT,
+            time_in_force=TimeInForce.DAY,
+            limit_price=None,  # invalid — DD-1 invariant
+            stop_price=None,
+            parent_id=None,
+            tags={},
+            created_at=datetime(2026, 5, 1, 14, 0, 0, tzinfo=timezone.utc),
+        )
+
+
+async def test_submit_duplicate_client_order_id_raises(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    order = _build_order()
+    await broker.submit(order)
+    with pytest.raises(RuntimeError, match="already submitted"):
+        await broker.submit(order)
+
+
+async def test_submit_before_connect_raises(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
+    with pytest.raises(RuntimeError, match="connect"):
+        await broker.submit(_build_order())
+
+
+async def test_cancel_unknown_id_raises(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,
     clock: SimClock,
@@ -660,7 +1091,22 @@ async def test_cancel_raises_not_implemented(
     from blive.domain.types import ClientOrderId
 
     broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
-    with pytest.raises(NotImplementedError, match="M2-IB.4"):
+    await broker.connect()
+    with pytest.raises(KeyError, match="unknown"):
+        await broker.cancel(ClientOrderId(uuid4()))
+
+
+async def test_cancel_before_connect_raises(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    from uuid import uuid4
+
+    from blive.domain.types import ClientOrderId
+
+    broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
+    with pytest.raises(RuntimeError, match="connect"):
         await broker.cancel(ClientOrderId(uuid4()))
 
 
@@ -669,12 +1115,14 @@ async def test_replace_raises_not_implemented(
     rate_limiter: TokenBucketRateLimiter,
     clock: SimClock,
 ) -> None:
+    """replace() stays deferred to M2-IB.4b (Phase 1 daily strategy doesn't
+    modify in-flight orders)."""
     from uuid import uuid4
 
     from blive.domain.types import ClientOrderId, OrderUpdate
 
     broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
-    with pytest.raises(NotImplementedError, match="M2-IB.4"):
+    with pytest.raises(NotImplementedError, match="M2-IB.4b"):
         await broker.replace(
             ClientOrderId(uuid4()),
             OrderUpdate(quantity=Decimal("50"), limit_price=None, stop_price=None),

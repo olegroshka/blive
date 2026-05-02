@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, AsyncIterator
@@ -59,14 +60,16 @@ import ib_async
 
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
-from blive.domain.events import AccountUpdate, ConnectionStatus
+from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
     AccountSnapshot,
     AssetClass,
     ClientOrderId,
+    Fill,
     Instrument,
     Order,
+    OrderEventKind,
     OrderSide,
     OrderType,
     OrderUpdate,
@@ -142,6 +145,41 @@ class IBShapeError(Exception):
     on the IB side (or in our parser); the connection itself is fine."""
 
 
+# IB orderStatus values that indicate venue acceptance (the FSM moves
+# SUBMITTED → ACCEPTED on first occurrence).
+_ACCEPTED_STATUSES = frozenset({"Submitted", "PreSubmitted"})
+
+# IB orderStatus values that indicate user-/system-initiated cancellation.
+_CANCELLED_STATUSES = frozenset({"Cancelled", "ApiCancelled"})
+
+# IB orderStatus value indicating the order was rejected (or otherwise
+# inactivated). IB also uses "Inactive" for orders held during pre-market;
+# for those, an explicit "Submitted" follows; we only emit REJECTED if a
+# whyHeld / lastFillPrice rejection signal is set.
+_REJECTED_STATUS = "Inactive"
+
+
+@dataclass
+class _OrderTrackingState:
+    """Per-order tracking maintained between submit and a terminal event.
+
+    Each blive submit() registers a fresh entry; the per-trade event
+    handlers consult and update it to decide which FSM event to emit.
+    Cleared when the order reaches a terminal state (FILLED / CANCELED /
+    REJECTED) — but we keep the entry around for cancel-path lookup; M5
+    reconciliation may revisit.
+    """
+
+    client_order_id: ClientOrderId
+    total_quantity: Decimal
+    instrument: Instrument
+    side: OrderSide
+    accepted_emitted: bool = False
+    terminal_emitted: bool = False
+    seen_exec_ids: set[str] = field(default_factory=set)
+    cumulative_filled: Decimal = Decimal("0")
+
+
 class IBBroker:
     """`BrokerPort` adapter for IB Paper / live, read side.
 
@@ -180,6 +218,12 @@ class IBBroker:
         # Background task running :meth:`_account_update_loop`. Cancelled on
         # disconnect; recreated on connect.
         self._account_update_task: asyncio.Task[None] | None = None
+        # Active orders submitted via this broker. Used by :meth:`cancel` to
+        # look up the underlying ``ib_async.Trade`` for ``ib.cancelOrder``,
+        # and by per-trade event handlers to correlate FSM transitions back
+        # to the originating ``client_order_id``.
+        self._trades_by_client_id: dict[ClientOrderId, ib_async.Trade] = {}
+        self._order_tracking: dict[ClientOrderId, _OrderTrackingState] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -375,17 +419,326 @@ class IBBroker:
     # --- BrokerPort: write methods (M2-IB.4) --------------------------------
 
     async def submit(self, order: Order) -> ClientOrderId:
-        raise NotImplementedError(
-            "IBBroker.submit lands at M2-IB.4 (write side). The IB Gateway's "
-            "'Read-Only API' checkbox must also be unchecked before submit "
-            "will work — Configuration > API > Settings."
+        """Place ``order`` on IB and emit the SUBMITTED event.
+
+        Maps the broker-neutral :class:`Order` to ``ib_async.Order``, calls
+        :meth:`ib.placeOrder` (consumes one ``global`` rate-limit token),
+        registers per-trade event handlers (statusEvent / fillEvent), and
+        emits an :class:`OrderEvent(SUBMITTED)` immediately. Subsequent
+        FSM transitions (ACCEPTED / PARTIAL_FILL / FILLED / CANCELED /
+        REJECTED) emit asynchronously as the per-trade events fire.
+
+        Returns the original ``client_order_id`` so the caller can
+        correlate across :meth:`events`. Idempotent on the
+        ``client_order_id`` — re-submitting an already-tracked id raises
+        :class:`RuntimeError` (matches REQUIREMENTS §5.3 idempotency
+        framing — the engine, not the FSM, owns the dedup).
+
+        Raises :class:`NotImplementedError` for ``MOC`` / ``LOC`` / ``OPG``
+        order types pending v1.1 (the v1 path needs only ``MKT`` / ``LMT``
+        / ``STP`` / ``STP_LMT`` per REQUIREMENTS §5.3).
+        """
+        self._require_connected()
+        # Order.client_order_id is typed as UUID per DD-1 §2.4; the BrokerPort
+        # surface uses the ClientOrderId NewType. Cast at the boundary so
+        # the broker's dict keys + return type align with the Port.
+        client_order_id = ClientOrderId(order.client_order_id)
+
+        if client_order_id in self._trades_by_client_id:
+            raise RuntimeError(
+                f"client_order_id {client_order_id} already submitted. "
+                f"REQUIREMENTS §5.3 idempotency: re-submission must be a "
+                f"no-op at the engine layer; the broker treats it as an "
+                f"error since the FSM is in SUBMITTED+ already."
+            )
+
+        contract = self._resolver.to_contract(order.instrument)
+        ib_order = _blive_to_ib_order(order)
+        # Stamp the client_order_id into the IB orderRef so reconciliation
+        # (M5) can correlate persisted-state events back to the originating
+        # blive order without depending on this in-process map.
+        ib_order.orderRef = str(client_order_id)
+
+        await self._client.rate_limiter.acquire("global")
+        # ib_async.IB.placeOrder is sync (returns a Trade immediately and
+        # the wire send is async-internal). The asyncio loop dispatches
+        # the wire send on the next iteration; no await needed here.
+        trade = self._client.ib.placeOrder(contract, ib_order)
+
+        tracking = _OrderTrackingState(
+            client_order_id=client_order_id,
+            total_quantity=order.quantity,
+            instrument=order.instrument,
+            side=order.side,
         )
+        self._trades_by_client_id[client_order_id] = trade
+        self._order_tracking[client_order_id] = tracking
+
+        # Wire per-trade handlers. Closures capture client_order_id so
+        # there's no global routing table needed; ib_async fires events
+        # on this specific Trade object as IB pushes orderStatus /
+        # execDetails / commissionReport messages.
+        trade.statusEvent += self._make_status_handler(client_order_id)
+        trade.fillEvent += self._make_fill_handler(client_order_id)
+
+        await self._events.put(
+            OrderEvent(
+                client_order_id=client_order_id,
+                venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                kind=OrderEventKind.SUBMITTED,
+                reason=None,
+                time_utc=self._clock.now(),
+            )
+        )
+        return client_order_id
 
     async def cancel(self, client_order_id: ClientOrderId) -> None:
-        raise NotImplementedError("IBBroker.cancel lands at M2-IB.4 (write side).")
+        """Cancel a pending or working order.
+
+        Looks up the underlying ``ib_async.Trade`` and calls
+        :meth:`ib.cancelOrder`. The CANCELED event emission happens
+        asynchronously when IB pushes the resulting orderStatus
+        ``Cancelled`` event (handled by the per-trade status handler
+        registered in :meth:`submit`).
+
+        Raises :class:`KeyError` if ``client_order_id`` is unknown to
+        this broker instance (e.g., the order was submitted in a prior
+        session and not yet reconciled — M5 work).
+        """
+        self._require_connected()
+        trade = self._trades_by_client_id.get(client_order_id)
+        if trade is None:
+            raise KeyError(
+                f"client_order_id {client_order_id} unknown to IBBroker; "
+                f"not in the active-orders map. Reconciliation (M5) is "
+                f"required to cancel orders submitted in a prior session."
+            )
+        await self._client.rate_limiter.acquire("global")
+        # ib_async.IB.cancelOrder is sync — submits the cancel request
+        # over the wire; the resulting Cancelled / ApiCancelled status
+        # arrives via trade.statusEvent.
+        self._client.ib.cancelOrder(trade.order)
 
     async def replace(self, client_order_id: ClientOrderId, new: OrderUpdate) -> None:
-        raise NotImplementedError("IBBroker.replace lands at M2-IB.4 (write side).")
+        """Replace a pending order's fields (quantity / limit / stop).
+
+        Not implemented at M2-IB.4a. IB's TWS API doesn't support atomic
+        replace for all order types; the standard pattern is
+        cancel-then-new with a fresh ``client_order_id`` per
+        REQUIREMENTS §5.3. M2-IB.4b ships the cancel-then-new wrapper
+        if a Phase 1 strategy needs in-flight order modification (the
+        Phase 1 daily strategy doesn't — submits at rebalance, no in-day
+        changes).
+        """
+        raise NotImplementedError(
+            "IBBroker.replace lands at M2-IB.4b. Phase 1 daily-rebalance "
+            "strategy doesn't modify in-flight orders; cancel-then-new "
+            "wrapper deferred until a strategy needs it."
+        )
+
+    # --- Internals: per-trade order-event handlers --------------------------
+
+    def _make_status_handler(self, client_order_id: ClientOrderId) -> Any:
+        """Build a closure that handles ``trade.statusEvent`` for the
+        order identified by ``client_order_id``.
+
+        ib_async fires ``trade.statusEvent`` whenever the venue pushes a
+        new ``orderStatus`` for this order. We map IB's status string to
+        the FSM transition and emit the corresponding
+        :class:`OrderEvent` if (a) we haven't already emitted that
+        transition (idempotency: IB sometimes re-pushes the same status),
+        and (b) the order isn't already in a terminal state.
+        """
+
+        def _handler(trade: ib_async.Trade) -> None:
+            self._on_order_status(client_order_id, trade)
+
+        return _handler
+
+    def _make_fill_handler(self, client_order_id: ClientOrderId) -> Any:
+        """Build a closure that handles ``trade.fillEvent`` for the
+        order identified by ``client_order_id``.
+
+        Fires after each ``execDetails`` push from IB. The Fill payload
+        carries price + quantity + commission (commission may not yet
+        be populated if the corresponding ``commissionReport`` hasn't
+        arrived; v1 emits with commission=0 in that case — M5 may
+        re-emit with commission once commissionReport arrives).
+        """
+
+        def _handler(trade: ib_async.Trade, fill: ib_async.Fill) -> None:
+            self._on_order_fill(client_order_id, trade, fill)
+
+        return _handler
+
+    def _on_order_status(self, client_order_id: ClientOrderId, trade: ib_async.Trade) -> None:
+        """Handle a ``trade.statusEvent`` push.
+
+        Fires for every IB ``orderStatus`` update. We map the textual
+        status to FSM transitions:
+
+        - ``"Submitted"`` / ``"PreSubmitted"`` → emit ACCEPTED (once).
+        - ``"Cancelled"`` / ``"ApiCancelled"`` → emit CANCELED.
+        - ``"Inactive"`` → emit REJECTED (with the IB whyHeld string as
+          reason; defensive — IB also uses Inactive for halted symbols
+          where it's transitional, but in practice for blive's adapter
+          path this means rejected).
+        - ``"Filled"`` / ``"PendingSubmit"`` / ``"PendingCancel"`` →
+          ignore (FILLED handled via fillEvent; the others are
+          transitional).
+        """
+        tracking = self._order_tracking.get(client_order_id)
+        if tracking is None or tracking.terminal_emitted:
+            return
+        status = trade.orderStatus.status
+
+        if status in _ACCEPTED_STATUSES and not tracking.accepted_emitted:
+            tracking.accepted_emitted = True
+            asyncio.create_task(
+                self._events.put(
+                    OrderEvent(
+                        client_order_id=client_order_id,
+                        venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                        kind=OrderEventKind.ACCEPTED,
+                        reason=None,
+                        time_utc=self._clock.now(),
+                    )
+                )
+            )
+        elif status in _CANCELLED_STATUSES:
+            tracking.terminal_emitted = True
+            # IB uses status="Cancelled" both for user-initiated cancels
+            # AND for system rejections (e.g., risk precautions, direct
+            # routing blocks like error 10311). Disambiguate via the
+            # trade log: any TradeLogEntry with non-zero errorCode means
+            # IB rejected — emit REJECTED per INV-13 §5; otherwise emit
+            # CANCELED.
+            error_log = _last_error_log_entry(trade)
+            if error_log is not None:
+                reason = _rejected_reason_from_log_entry(error_log)
+                kind = OrderEventKind.REJECTED
+            else:
+                reason = _cancel_reason_from_status(status, trade)
+                kind = OrderEventKind.CANCELED
+            asyncio.create_task(
+                self._events.put(
+                    OrderEvent(
+                        client_order_id=client_order_id,
+                        venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                        kind=kind,
+                        reason=reason,
+                        time_utc=self._clock.now(),
+                    )
+                )
+            )
+        elif status == _REJECTED_STATUS:
+            tracking.terminal_emitted = True
+            reason = _rejected_reason_from_trade(trade)
+            asyncio.create_task(
+                self._events.put(
+                    OrderEvent(
+                        client_order_id=client_order_id,
+                        venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                        kind=OrderEventKind.REJECTED,
+                        reason=reason,
+                        time_utc=self._clock.now(),
+                    )
+                )
+            )
+
+    def _on_order_fill(
+        self,
+        client_order_id: ClientOrderId,
+        trade: ib_async.Trade,
+        fill: ib_async.Fill,
+    ) -> None:
+        """Handle a ``trade.fillEvent`` push.
+
+        Constructs a broker-neutral :class:`Fill` and emits PARTIAL_FILL
+        (cumulative < total) or FILLED (cumulative == total). Dedupes
+        via ``execDetails.execId`` since IB occasionally re-pushes
+        execDetails on reconnect (per [INV-13 §6](../../../../docs/inv/order_state_transitions.md#6-idempotency)).
+        """
+        tracking = self._order_tracking.get(client_order_id)
+        if tracking is None or tracking.terminal_emitted:
+            return
+
+        execution = fill.execution
+        exec_id = execution.execId if execution is not None else ""
+        if not exec_id:
+            log.warning(
+                "IB fillEvent without execId; skipping for client_order_id=%s", client_order_id
+            )
+            return
+        if exec_id in tracking.seen_exec_ids:
+            return  # dedupe
+        tracking.seen_exec_ids.add(exec_id)
+
+        # ACCEPTED is implied by the first fill if statusEvent didn't
+        # fire first (rare but observed on fast fills).
+        if not tracking.accepted_emitted:
+            tracking.accepted_emitted = True
+            asyncio.create_task(
+                self._events.put(
+                    OrderEvent(
+                        client_order_id=client_order_id,
+                        venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                        kind=OrderEventKind.ACCEPTED,
+                        reason=None,
+                        time_utc=self._clock.now(),
+                    )
+                )
+            )
+
+        fill_qty = Decimal(str(execution.shares)) if execution is not None else Decimal("0")
+        fill_price = Decimal(str(execution.price)) if execution is not None else Decimal("0")
+        commission_obj = fill.commissionReport
+        commission = (
+            Decimal(str(commission_obj.commission))
+            if commission_obj is not None and commission_obj.commission
+            else Decimal("0")
+        )
+        currency = (
+            commission_obj.currency
+            if commission_obj is not None and commission_obj.currency
+            else tracking.instrument.currency
+        )
+        fill_time = (
+            execution.time
+            if execution is not None and isinstance(execution.time, datetime)
+            else self._clock.now()
+        )
+
+        blive_fill = Fill(
+            client_order_id=client_order_id,
+            venue_order_id=str(trade.order.orderId) if trade.order.orderId else "",
+            venue_exec_id=exec_id,
+            instrument=tracking.instrument,
+            side=tracking.side,
+            quantity=fill_qty,
+            price=fill_price,
+            commission=commission,
+            currency=currency,
+            time_utc=fill_time,
+        )
+        tracking.cumulative_filled += fill_qty
+        terminal = tracking.cumulative_filled >= tracking.total_quantity
+        kind = OrderEventKind.FILLED if terminal else OrderEventKind.PARTIAL_FILL
+        if terminal:
+            tracking.terminal_emitted = True
+
+        asyncio.create_task(
+            self._events.put(
+                OrderEvent(
+                    client_order_id=client_order_id,
+                    venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                    kind=kind,
+                    reason=None,
+                    time_utc=self._clock.now(),
+                    fill=blive_fill,
+                )
+            )
+        )
 
     # --- Internals: AccountUpdate emission timer (ADR-033) ------------------
 
@@ -786,6 +1139,141 @@ def _parse_time_in_force(tif_str: str) -> TimeInForce:
     if mapped is None:
         raise IBShapeError(f"Unsupported IB tif {tif_str!r}")
     return mapped
+
+
+# --- Internals: blive Order ↔ ib_async Order ---------------------------------
+
+
+def _blive_to_ib_order(order: Order) -> ib_async.Order:
+    """Map a broker-neutral :class:`Order` to ``ib_async.Order``.
+
+    M2-IB.4a supports ``MKT``, ``LMT``, ``STP``, ``STP_LMT``. ``MOC`` /
+    ``LOC`` / ``OPG`` are valid blive types per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
+    but raise here pending v1.1 — they require additional IB plumbing
+    (``goodAfterTime``, ``tif="OPG"``, etc.).
+    """
+    action = order.side.value  # OrderSide.BUY → "BUY"; OrderSide.SELL → "SELL"
+    qty = float(order.quantity)
+    tif = order.time_in_force.value  # DAY, GTC, IOC, FOK, OPG
+
+    ib_order: ib_async.Order
+    if order.order_type == OrderType.MKT:
+        ib_order = ib_async.MarketOrder(action=action, totalQuantity=qty)
+    elif order.order_type == OrderType.LMT:
+        if order.limit_price is None:
+            raise ValueError(f"LMT order {order.client_order_id} requires limit_price")
+        ib_order = ib_async.LimitOrder(
+            action=action,
+            totalQuantity=qty,
+            lmtPrice=float(order.limit_price),
+        )
+    elif order.order_type == OrderType.STP:
+        if order.stop_price is None:
+            raise ValueError(f"STP order {order.client_order_id} requires stop_price")
+        ib_order = ib_async.StopOrder(
+            action=action,
+            totalQuantity=qty,
+            stopPrice=float(order.stop_price),
+        )
+    elif order.order_type == OrderType.STP_LMT:
+        if order.limit_price is None or order.stop_price is None:
+            raise ValueError(
+                f"STP_LMT order {order.client_order_id} requires both "
+                f"limit_price and stop_price"
+            )
+        ib_order = ib_async.StopLimitOrder(
+            action=action,
+            totalQuantity=qty,
+            lmtPrice=float(order.limit_price),
+            stopPrice=float(order.stop_price),
+        )
+    else:
+        raise NotImplementedError(
+            f"IBBroker.submit does not support order_type={order.order_type.value} "
+            f"at M2-IB.4a. Supported: MKT, LMT, STP, STP_LMT. MOC/LOC/OPG "
+            f"land at v1.1 if a strategy needs them."
+        )
+
+    ib_order.tif = tif
+    return ib_order
+
+
+def _cancel_reason_from_status(status: str, trade: ib_async.Trade) -> str:
+    """Compute the [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
+    cancel reason from the IB status + trade context.
+
+    "ApiCancelled" → ``"engine"`` (we initiated the cancel via cancelOrder).
+    "Cancelled" → ``"venue_purge"`` if the trade has no prior cancel
+    intent in its log; otherwise ``"engine"``. Defensive — IB sometimes
+    fires "Cancelled" even when blive initiated.
+    """
+    if status == "ApiCancelled":
+        return "engine"
+    # IB "Cancelled" typically follows our cancelOrder request; treat as
+    # engine-initiated unless we have evidence otherwise.
+    return "engine"
+
+
+def _last_error_log_entry(trade: ib_async.Trade) -> Any:
+    """Return the most recent ``trade.log`` entry whose ``errorCode`` is
+    non-zero, or ``None`` if the log is empty or contains only zero-code
+    entries.
+
+    Used by :meth:`IBBroker._on_order_status` to disambiguate CANCELED
+    from REJECTED on IB ``status="Cancelled"``: a non-zero ``errorCode``
+    in the trade log means the cancel was system-initiated due to a
+    rejection (e.g., risk precautions, direct-routing block at error
+    10311, dup orderId at 322). [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
+    distinguishes engine-initiated cancels from venue-side rejections;
+    [INV-14](../../../../docs/inv/ib_error_codes.md) catalogues the codes.
+
+    Defensive against IB's loose typing — ``getattr(..., 0) or 0`` handles
+    missing attribute, ``None``, and 0 identically.
+    """
+    log_entries = getattr(trade, "log", None)
+    if not log_entries:
+        return None
+    for entry in reversed(log_entries):
+        error_code = getattr(entry, "errorCode", 0) or 0
+        if error_code:
+            return entry
+    return None
+
+
+def _rejected_reason_from_log_entry(entry: Any) -> str:
+    """Build the [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
+    reason string from a ``TradeLogEntry`` with a non-zero ``errorCode``.
+
+    Format: ``"ib:{errorCode} {message}"`` so consumers can grep by code
+    for analytics ([INV-14](../../../../docs/inv/ib_error_codes.md))
+    while keeping the human message visible. Empty message degrades to
+    ``"ib:{errorCode}"``.
+    """
+    error_code = getattr(entry, "errorCode", 0) or 0
+    message = getattr(entry, "message", "") or ""
+    if message:
+        return f"ib:{error_code} {message}"
+    return f"ib:{error_code}"
+
+
+def _rejected_reason_from_trade(trade: ib_async.Trade) -> str:
+    """Extract the reject reason from an Inactive trade.
+
+    IB pushes the reject reason via the ``log`` attribute (TradeLogEntry
+    list) and via ``orderStatus.whyHeld``. We prefer the most recent log
+    entry's message, falling back to whyHeld, falling back to a generic
+    message. The result is the [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
+    reason string for the REJECTED event.
+    """
+    if trade.log:
+        last = trade.log[-1]
+        msg = getattr(last, "message", "")
+        if msg:
+            return msg
+    why_held = getattr(trade.orderStatus, "whyHeld", "")
+    if why_held:
+        return why_held
+    return "rejected"
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
