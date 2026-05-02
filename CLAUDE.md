@@ -20,7 +20,7 @@ referenced_by:
 
 # Project instructions
 
-You are working on `blive` — a live execution engine for Interactive Brokers, sibling to `btest`. This project enforces a substrate-engineering discipline called **Cognitive Cartography**, articulated in [`CONTEXT_PROTOCOL.md`](./CONTEXT_PROTOCOL.md) and the methodology paper at [`docs/method/paper/cognitive_cartography.tex`](docs/method/paper/cognitive_cartography.tex). Every edit to docs and code follows it.
+You are working on `blive` — a multi-broker live execution engine, sibling to `btest`. The supported brokers are configured via the multi-broker registry pattern in [ADR-034](docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004); current first-class adapters are **Interactive Brokers (IB)** and **IG**, plus paper / mock for development. The active integration focus is IB (per `TASK_REGISTRY.md` M2-IB); the IG adapter is in the repo and supported as a first-class broker (its M2-IG.5 strategy-run sub-milestone is the part that was deferred, not the adapter itself). This project enforces a substrate-engineering discipline called **Cognitive Cartography**, articulated in [`CONTEXT_PROTOCOL.md`](./CONTEXT_PROTOCOL.md) and the methodology paper at [`docs/method/paper/cognitive_cartography.tex`](docs/method/paper/cognitive_cartography.tex). Every edit to docs and code follows it.
 
 This file is a **session-bootstrap pointer** ([ADR-042](docs/decisions/DECISIONS.md#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point)). Its content is *pointers* to canonical substrate, never restated rules — the protocol is the SSOT.
 
@@ -101,3 +101,4 @@ This file is the Claude Code instance of the bootstrap-file pattern ([ADR-042](d
 ## Changelog
 
 - **v1.0 (2026-05-02)** — initial write. Operationalises [CONTEXT_PROTOCOL §8.1](./CONTEXT_PROTOCOL.md) warm-up + §11.2 L0 baseline per ADR-042. First instance of the session-bootstrap-file pattern.
+- **v1.0.1 (2026-05-02)** — opening sentence corrected: blive is a *multi-broker* live execution engine (per [ADR-034](docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004)). The prior wording said "for Interactive Brokers", which conflated the v1 / current-focus broker (IB) with the engine's actual scope (IB + IG + paper/mock). No semantic change to the discipline.

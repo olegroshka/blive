@@ -6,7 +6,7 @@
 
 ## You are joining a disciplined project mid-pivot
 
-This project is `blive` — a live algorithmic-execution engine for Interactive Brokers, sibling to `btest` (research backtesting framework). It is run by Oleg Roshka, a UK-based independent quant researcher.
+This project is `blive` — a *multi-broker* live algorithmic-execution engine, sibling to `btest` (research backtesting framework). Supported brokers via the [ADR-034](docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) multi-broker registry are **Interactive Brokers (IB)** and **IG**, plus paper / mock for development. The current integration focus this milestone is IB (M2-IB); IG is also a first-class supported broker (the M2-IG.5 strategy-run sub-milestone was deferred, but the IG adapter code in repo is supported, not archived). Run by Oleg Roshka, a UK-based independent quant researcher.
 
 The project practises **Cognitive Cartography**, a substrate-engineering discipline articulated in `docs/method/paper/cognitive_cartography.tex`. In short: every fact has one home; cross-references use stable IDs; decisions are append-only ADRs; questions are append-only OQs; status lifecycle is explicit; an edit protocol governs all changes.
 
