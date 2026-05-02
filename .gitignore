@@ -32,6 +32,12 @@ env/
 *.swp
 *.swo
 
+# Claude Code per-machine state (settings.local.json, scheduled_tasks.lock,
+# agent transcripts). Project-level config that *should* be shared (e.g. a
+# committed .claude/settings.json or .claude/agents/) can be re-added via
+# explicit !-rules below if/when introduced.
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
