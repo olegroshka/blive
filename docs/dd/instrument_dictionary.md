@@ -3,8 +3,8 @@ id: DD-7
 title: Instrument Dictionary (`blive.Instrument` ↔ IB `Contract` / `ConID`)
 status: STABLE
 owner: Claude
-last_reviewed: 2026-05-01
-version: 1.0
+last_reviewed: 2026-05-02
+version: 1.1
 sources:
   - https://interactivebrokers.github.io/tws-api/contracts.html  # accessed 2026-04-27
   - https://github.com/ib-api-reloaded/ib_async                  # accessed 2026-04-27
@@ -72,21 +72,23 @@ IB does not distinguish ETFs from equities at the `secType` level — both resol
 
 Unsupported asset classes raise `InstrumentNotResolvable(instrument)` at the adapter boundary; the call never reaches the wire.
 
-## 3. `venue` (MIC) → IB `exchange`
+## 3. `venue` (MIC) → IB `exchange` + (optional) `primaryExchange`
 
-Phase 1 only needs one row; the table grows per venue.
+Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) (2026-05-02 refinement of ADR-032), US-equity venues route via SMART with a `primaryExchange` hint; non-US venues retain direct routing. The `primaryExchange` column carries the IB-named exchange when `IB exchange` is `SMART`; otherwise `—`.
 
-| MIC (ISO 10383) | IB `exchange` | Used by |
-|---|---|---|
-| `XPAR` | `SBF` | Phase 1 (`CAC.PA`, [ADR-021](../decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf)) |
-| `XNAS` | `NASDAQ` | future Phase 2/3 |
-| `XNYS` | `NYSE` | future Phase 2/3 |
-| `ARCX` | `ARCA` | future Phase 2/3 |
-| `BATS` | `BATS` | future |
-| `XLON` | `LSE` | post-M8 ([ADR-018](../decisions/DECISIONS.md#adr-018--uk-equity-strategies-deferred-to-post-m8)) |
-| `XETR` | `IBIS` | future |
+| MIC (ISO 10383) | IB `Contract.exchange` | `primaryExchange` (when SMART) | Used by |
+|---|---|---|---|
+| `XPAR` | `SBF` | — | Substrate for [ADR-021](../decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) (`CAC.PA`); SUPERSEDED-BY-ADR-043 as Phase 1 strategy designation, but the resolver path stays durable (M2-IB.4a-happy-cacpa wire validation). Direct routing requires API → Precautions bypass per `M2-IB.4a-happy-cacpa`. |
+| `XNAS` | **`SMART`** | `NASDAQ` | **Phase 1** (TQQQ / IEF on QQQ / IEF venue per [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)). Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). |
+| `XNYS` | **`SMART`** | `NYSE` | **Phase 1** (TMF on NYSE per [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)). Per ADR-046. |
+| `ARCX` | **`SMART`** | `ARCA` | Future US-equity strategies. Per ADR-046. |
+| `BATS` | **`SMART`** | `BATS` | Future US-equity strategies. Per ADR-046. |
+| `XLON` | `LSE` | — | post-M8 ([ADR-018](../decisions/DECISIONS.md#adr-018--uk-equity-strategies-deferred-to-post-m8)) — direct routing; SMART support for European cash equities is venue-by-venue and revisited then. |
+| `XETR` | `IBIS` | — | future — direct routing. |
 
 Sourced from [KB-2 §5](../kb/ib_capability_matrix.md#5-routing). Unknown MICs raise `InstrumentNotResolvable`; the operator extends the table when a new venue lands.
+
+**SMART vs direct discriminator**: the resolver applies the SMART convention when `instrument.venue` is in the **US-SMART set** (`XNAS`, `XNYS`, `ARCX`, `BATS`) AND `instrument.tradability == "spot"` AND `instrument.asset_class ∈ {EQUITY, ETF}`. Other combinations (CFD / spread_bet, non-US venues, options / futures) bypass the SMART logic — CFD/spread_bet are IG-side per ADR-037; options/futures grow their own routing table when those asset classes land.
 
 ## 3.1 Yahoo Finance / EODHD exchange-suffix → MIC
 
@@ -160,3 +162,4 @@ None blocking M2. When Phase 2 introduces multi-venue routing for the same instr
 - **v0.1 (2026-04-27)** — initial DRAFT at M2 entry; substrate for ADR-032. Promotes to STABLE when M2 IBBroker successfully exercises the path against IB Paper.
 - **v0.2 (2026-05-01)** — M2-IB.3a refinement. §5 public surface updated: class renamed `InstrumentResolver` → `IBInstrumentResolver` to match implementation + IG-side parallelism (`IGInstrumentResolver`); constructor signature refined from `(ib, rate_limiter)` to `(client: IBClient)` because the M2-IB.2 :class:`IBClient` already encapsulates both — taking it directly avoids duplicate wiring at the factory boundary and matches the IG analogue. The functional contract (lazy resolve + cache + raises on zero / multiple / zero-conId / unmapped fields) is unchanged. Status stays DRAFT — STABLE flip remains gated on first successful Contract resolution against IB Paper (handled at the `M2-IB.3a-resolved` commit when the operator runs `scripts/probe_ib_resolve_contract.py`).
 - **v1.0 (2026-05-01)** — M2-IB.3a-resolved STABLE flip. The Phase 1 instrument `Instrument(symbol="CAC.PA", venue="XPAR", currency="EUR", asset_class=ETF, tradability="spot")` resolved cleanly against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` reported `conId=11183823 primaryExchange=SBF` in 0.04s; cache hit on second resolve in 0ms). DD-7 §1 field map + §2 secType table + §3 MIC→exchange table + §4 ConID lazy-resolve + §5 IBInstrumentResolver contract + new §3.1 Yahoo-suffix sub-table all empirically validated. Added §3.1 (Yahoo Finance / EODHD exchange-suffix → MIC) per [ADR-041](../decisions/DECISIONS.md#adr-041--yahoo-suffix-translation-in-ib-instrument-resolver) — IB resolver strips `.PA` / `.L` / `.DE` / `.AS` suffixes when the suffix matches the venue MIC. Status DRAFT → STABLE; future venue additions to §3 / §3.1 are routine refinements rather than substrate-flipping changes.
+- **v1.1 (2026-05-02)** — §3 venue table grew a `primaryExchange` column per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). US-equity venues (XNAS / XNYS / ARCX / BATS) route via `exchange="SMART"` with the `primaryExchange` hint set; non-US venues (XPAR / XLON / XETR) retain direct routing. SMART vs direct discriminator codified: applies when `venue` is in the US-SMART set AND `tradability="spot"` AND `asset_class ∈ {EQUITY, ETF}`. Added load-bearing for [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)'s A3 strategy on TQQQ/TMF/IEF; production resolver implements at M2-IB.6.1 (the probe-local `_SmartUsResolver` in `scripts/probe_ib_submit.py` is the prototype). XPAR / SBF row carries forward the substrate-durable note (CAC.PA stays wire-validated; only the Phase 1 strategy designation moved per ADR-043). STABLE preserved across this refinement.

@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-05-02
-version: 0.14
+version: 0.15
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -71,6 +71,9 @@ referenced_by:
 | [ADR-039](#adr-039--phase-1-strategy-under-ig-bridge-cac-40-cfd) | Phase 1 strategy under IG bridge: CAC 40 CFD | ACCEPTED | 2026-04-27 | — |
 | [ADR-042](#adr-042--session-bootstrap-files-agent-agnostic-pattern-for-l0-warm-up-entry-point) | Session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point | ACCEPTED | 2026-05-02 | — |
 | [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) | Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2) | ACCEPTED | 2026-05-02 | — |
+| [ADR-044](#adr-044--multi-instrument-pipeline-support-companion-to-adr-043) | Multi-instrument pipeline support (companion to ADR-043) | ACCEPTED | 2026-05-02 | — |
+| [ADR-045](#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) | LongShortPortfolio btest dispatch (extends ADR-030) | ACCEPTED | 2026-05-02 | — |
+| [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) | IB resolver SMART routing for US equities (refines ADR-032) | ACCEPTED | 2026-05-02 | — |
 
 ---
 
@@ -1974,6 +1977,163 @@ A3's mechanics (per [KB-5 §2 A3](../kb/strategy_taxonomy.md#a3--multi-instrumen
 
 ---
 
+## ADR-044 — Multi-instrument pipeline support (companion to ADR-043)
+
+- **status:** ACCEPTED
+- **date:** 2026-05-02
+- **decider:** Oleg (with Claude)
+- **companion:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)
+
+### Context
+
+[ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) picks A3 (`triple_lev_sma_filter_dsl` on TQQQ/TMF/IEF) as the Phase 1 strategy. The current pipeline drivers — `blive.runtime.paper_pipeline.run_paper_pipeline` (M1) and `blive.runtime.ib_pipeline.run_ib_pipeline` (M2-IB.5) — walk a single `instrument: Instrument` per call. The Sizer (`blive.sizing.size_orders`) already accepts multi-instrument target weights (`target_weights: dict[str, float]`); the pipeline driver is the only thing that needs widening.
+
+### Decision
+
+The IB pipeline (per ADR-043 the Phase 1 path) extends to multi-instrument operation:
+
+1. **Public surface**: `run_ib_pipeline(*, instruments: list[Instrument], ...)` instead of `instrument: Instrument`. The first instrument in the list is the canonical bar timeline (most strategies will share rebalance times across instruments; if not, the pipeline reads bar timestamps from the first instrument and applies the same rebalance moments to the rest, which matches A3's daily rebalance contract).
+2. **Signal contract**: replace `position_series: pd.Series` (single-instrument 0/1) with `target_weights_series: pd.DataFrame` indexed by bar `close_time_utc`, columns being the per-instrument symbol (`TQQQ`, `TMF`, `IEF`), values float weights. The SMA stub (per `blive.runtime.signals`) extends accordingly; ADR-045's LongShortPortfolio dispatch produces the same shape from btest.
+3. **Per-rebalance loop**: read the row from `target_weights_series` for the current bar's close_time_utc; pass the per-symbol dict to `Sizer.size_orders(...)`; the Sizer's existing per-instrument logic produces N orders (one per instrument with non-zero target delta); each order goes through the RiskEngine and IBBroker individually (per-order FSM drain unchanged).
+4. **`PaperMarketData`** already supports multi-instrument fixtures via `fixtures: Mapping[Instrument, Path]`. The driver provides one parquet per instrument.
+5. **`IBRunResult` schema widens**: `equity_curve` rows gain `positions: dict[str, Decimal]` (per-instrument quantity) replacing the single `position_qty`; `fills_count`, `submitted_count`, `canceled_count`, `rejected_count` stay scalar (across all instruments).
+
+The single-instrument `run_paper_pipeline` (M1) and the single-instrument shape of the M2-IB.5 driver stay backwards-compatible — the multi-instrument extension lives on `run_ib_pipeline` only (via either an additional optional `instruments` arg defaulting to `[instrument]` for compat, or a sibling `run_ib_multi_pipeline` — final shape decided at M2-IB.6.1 implementation time; both meet ADR-044's contract).
+
+### Alternatives Considered
+
+1. **Build a separate `run_ib_multi_pipeline` and leave `run_ib_pipeline` single-instrument forever.** Rejected — code duplication; Sizer / RiskEngine paths are already multi-instrument-capable; consolidation under one pipeline stays cleaner.
+2. **Wait for a broker-agnostic refactor of `paper_pipeline.py` and `ib_pipeline.py` into one `run_pipeline` that handles both modes.** Rejected — out of scope for M2-IB.6; the unification is meaningful M5+ work that benefits from a fresh-session task with proper scope, not glommed onto Phase 1's path to live trading.
+3. **Pass `instruments` + a callable `target_weights_fn(bar) → dict[str, float]` instead of a pre-computed DataFrame.** Rejected — DataFrame is more testable (deterministic, comparable, replayable); btest's `compute_target_weights_for_date()` returns Series rows that pivot trivially to the DataFrame shape.
+
+### Consequences
+
+- **Positive:** A3 (and any future multi-instrument strategy) runs through the same orchestrator. The Sizer / RiskEngine / FSM-drain paths are unchanged. New strategies plug in via the signal contract (DataFrame), not by writing a new pipeline.
+- **Negative:** `IBRunResult` schema change is a minor breaking change for the existing M2-IB.5 driver `run_m2ib5_paper.py` summary printer. Mitigated by treating the single-instrument case as a degenerate multi-instrument case (1 column DataFrame, 1-element instruments list) — the M2-IB.5 driver continues to work with the new pipeline if we route it through a thin compat shim.
+- **Risk:** per-instrument FSM drains run sequentially within each rebalance — if the pipeline submits 3 orders at the same bar close, and each waits up to `event_wait_seconds` (default 10s) for terminal, the rebalance can take up to 30s. For a daily-frequency strategy with infrequent regime flips this is fine; intraday strategies will need per-order parallelism (M5+ concern).
+- **Follow-ups:**
+  - M2-IB.6.1 ships the implementation + 3-instrument synthetic-fixture tests.
+  - The M2-IB.5 driver `run_m2ib5_paper.py` may stay single-instrument or upgrade to use the multi-instrument shape with a 1-element list — decided at implementation time.
+  - The Sizer's existing multi-instrument capability is the load-bearing primitive — no Sizer changes needed.
+
+### Cross-References
+
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — the strategy switch this enables.
+- [ADR-008](#adr-008--riskengine-no-bypass-enforced-architecturally) — RiskEngine no-bypass; per-order traversal preserved.
+- [ADR-045](#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) — produces the target_weights_series this pipeline consumes.
+- `blive.sizing.size_orders` — existing multi-instrument capability.
+- `blive.runtime.ib_pipeline.run_ib_pipeline` — extended at M2-IB.6.1.
+
+---
+
+## ADR-045 — LongShortPortfolio btest dispatch (extends ADR-030)
+
+- **status:** ACCEPTED
+- **date:** 2026-05-02
+- **decider:** Oleg (with Claude)
+- **extends:** [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010)
+
+### Context
+
+[ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) (per-archetype btest interpreter dispatch) lit up the `TimingPortfolio → SingleAssetRunner` path for M1's A2 strategy. `LongShortPortfolio` — the archetype A1 / A1a / A3 use — has a different btest interpreter: a free function `compute_target_weights_for_date()` in `quantdsl_backtest.engine.portfolio_engine`, surfaced at M1 via the [RETRO-M1](../retros/M1_retrospective.md#surprises) "PortfolioEngine is a function, not a class" surprise. ADR-030's "three engines" prose is incomplete and is acknowledged so in [OQ-030](OPEN_QUESTIONS.md#oq-030--which-btest-interpreter-does-blive-call-for-timingportfolio-and-other-non-longshort-archetypes) (resolved by ADR-030 with the dispatch pattern, not by enumeration of all archetype paths).
+
+[ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) picks A3, which uses `LongShortPortfolio` (with empty `short_book` + `MaskSelector` + `ExternalFactor(per_instrument=True)`). The pipeline needs the LongShortPortfolio dispatch path lit up.
+
+### Decision
+
+Extend the per-archetype dispatch from ADR-030 to cover `LongShortPortfolio`:
+
+1. **Detection**: `blive.runtime.ib_pipeline` (and any future broker pipeline) inspects `live_strategy.strategy.portfolio` type at entry and dispatches:
+   - `TimingPortfolio` → `quantdsl_backtest.runners.single_asset.SingleAssetRunner` (existing per ADR-030)
+   - `LongShortPortfolio` → `quantdsl_backtest.engine.portfolio_engine.compute_target_weights_for_date()` (this ADR)
+   - any other type → `NotImplementedError` with a clear "extend dispatch" message
+2. **Call shape**: per-rebalance call `compute_target_weights_for_date(strategy=..., as_of=bar.close_time_utc, factor_data=..., signal_data=..., ...)` returning a `pd.Series[symbol → float]` (target weight per instrument). The pipeline pivots into the multi-instrument `target_weights_series` DataFrame contract from [ADR-044](#adr-044--multi-instrument-pipeline-support-companion-to-adr-043).
+3. **Factor + signal data**: A3 specifically needs `ExternalFactor(per_instrument=True)` reading the wide eligibility parquet (`triple_lev_sma_eligible.parquet`); the M2-IB.6.1 refresh script produces this from the SMA logic. Other LongShortPortfolio strategies may use different `Factor` types — the FactorEngine evaluates them as it does in btest; blive provides the factor inputs.
+4. **No reimplementation**: blive does NOT reimplement `compute_target_weights_for_date()` — per [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) we import it directly. The dispatch is the load-bearing change; the engine itself is btest's.
+
+### Alternatives Considered
+
+1. **Reimplement LongShortPortfolio's logic inside blive** (analogous to writing a SingleAssetRunner-equivalent). Rejected per ADR-010 (don't fork btest); also forfeits all the existing btest tests for the engine.
+2. **Wait for btest to expose a unified `Engine.run(strategy, as_of)` API.** Rejected — indeterminate timing; the dispatch pattern is already established (ADR-030) and is what btest's surface naturally supports.
+3. **Use a single dispatch table mapping (Portfolio type) → (interpreter callable)** to make the path data-driven rather than `if isinstance` chains. Reasonable but premature; with two archetypes lit up, an explicit `if/elif` is more readable. Promote to a registry when a third archetype lands.
+4. **Drop the LongShortPortfolio path entirely and just compute the SMA eligibility client-side** (skip btest's interpreter, build target_weights from the eligibility booleans directly). Rejected — defeats ADR-010's reuse; loses the FactorEngine / SignalEngine code path that calibrates parity with btest backtests.
+
+### Consequences
+
+- **Positive:** A3 runs end-to-end through btest's actual interpreter — parity with the notebook's backtest is honest. Future LongShortPortfolio strategies (A1 single-name post-M8, A1a `lagging_indecies` Phase 2) plug in for free. The per-archetype dispatch pattern from ADR-030 generalises cleanly.
+- **Negative:** small additional dispatch-site complexity in the pipeline driver. Tests cover both paths.
+- **Risk:** btest API surface for `compute_target_weights_for_date()` may change before Phase 2 (the M1 retro flagged this as a substrate-vs-reality drift mode). Mitigated by the CI smoke-import test (`tests/contracts/test_btest_imports.py`) that catches signature breaks; if the API changes, blive adapts in the dispatch layer, not the strategy code.
+- **Follow-ups:**
+  - M2-IB.6.1 ships the implementation + tests.
+  - When a strategy uses something other than `TimingPortfolio` or `LongShortPortfolio` (e.g. a pairs strategy with `PairsPortfolio` if btest grows one), this ADR's dispatch table extends. Each new archetype → new entry; the pattern stays the same.
+  - KB-1 §6 (btest DSL inventory) gains an explicit row for the LongShortPortfolio interpreter dispatch when KB-1 next refreshes.
+
+### Cross-References
+
+- [ADR-010](#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) — reuse btest by import; this ADR honours that.
+- [ADR-030](#adr-030--per-archetype-btest-interpreter-dispatch-amends-adr-010) — the dispatch pattern this extends.
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — strategy that needs this path lit up.
+- [ADR-044](#adr-044--multi-instrument-pipeline-support-companion-to-adr-043) — pipeline shape that consumes the target_weights_series this dispatch produces.
+- [OQ-030](OPEN_QUESTIONS.md#oq-030--which-btest-interpreter-does-blive-call-for-timingportfolio-and-other-non-longshort-archetypes) — original open question; ADR-030 + this extension fully address it.
+- [RETRO-M1 §"Surprises"](../retros/M1_retrospective.md#surprises) — `PortfolioEngine` is a function, not a class.
+
+---
+
+## ADR-046 — IB resolver SMART routing for US equities (refines ADR-032)
+
+- **status:** ACCEPTED
+- **date:** 2026-05-02
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract)
+
+### Context
+
+[ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) codified the `Instrument` ↔ `Contract` / `ConID` resolution policy. The current `IBInstrumentResolver` maps `venue` (MIC) → IB `exchange` directly via the [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) table (XPAR → SBF, XNAS → NASDAQ, etc.). For US-equity venues (NASDAQ / NYSE / ARCA / BATS), direct routing trips IB Paper's "Direct Routed Orders" precaution at error 10311 (observed at `M2-IB.4a-rejected`).
+
+The probe-local `_SmartUsResolver` workaround in `scripts/probe_ib_submit.py` routes US-venue spot equities via `exchange="SMART"` with `primaryExchange=<NASDAQ/NYSE/...>` hint — works cleanly without depending on operator-side API → Precautions bypass. This is also IB's recommended best practice for US equities (the SMART router optimises across the listing exchange + ECNs); direct routing to NASDAQ-the-exchange is rarely correct in production.
+
+[ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) picks A3 with universe TQQQ / TMF / IEF — all US ETFs. Codifying SMART routing in the production resolver moves this from "probe-local workaround" to "load-bearing for Phase 1 / live cutover".
+
+### Decision
+
+The production `IBInstrumentResolver` routes US-equity venues via SMART:
+
+1. For `Instrument` records with `tradability="spot"` and `asset_class ∈ {EQUITY, ETF}` whose `venue` is in the **US-SMART set** (`XNAS`, `XNYS`, `ARCX`, `BATS`), the resolver constructs `ib_async.Contract(secType="STK", symbol=..., currency=..., exchange="SMART", primaryExchange=<IB-named-exchange-from-§3>)`.
+2. Other venues (XPAR/SBF, XLON/LSE, XETR/IBIS, etc.) retain direct routing. SMART support for European cash equities is limited and venue-by-venue; revisit per venue when those return to scope.
+3. **DD-7 §3** is amended to grow a `primaryExchange` column for the US rows; the existing `IB exchange` column carries `SMART` for those rows.
+4. The probe-local `_SmartUsResolver` in `scripts/probe_ib_submit.py` becomes redundant once the production resolver implements this — can be removed at M2-IB.6.1 with the production code, or kept as historical-substrate documentation.
+5. Other `tradability` values (`cfd`, `spread_bet`) don't apply to IB retail per [ADR-040](#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway) (and the resolver already raises `InstrumentNotResolvable` for them); this ADR's scope is `tradability="spot"` only.
+
+### Alternatives Considered
+
+1. **Keep direct routing + rely on the API → Precautions bypass.** Rejected: works for paper but the bypass is operator-side config that can drift across IB Gateway restarts; SMART routing is IB's recommended best practice anyway. The bypass mechanism stays as a safety net for venues that don't have SMART (e.g. SBF for European cash equities) — for US, SMART is the right default.
+2. **Introduce an `Instrument.routing_hint` field** (`"smart"` / `"direct"`) and let the strategy author specify per-Instrument. Rejected: bloats the broker-neutral type with broker-specific knowledge per ADR-032 §"Alternatives" item 1 (the same reason `ib_symbol` was rejected); routing is the *adapter's* responsibility.
+3. **Always SMART for everything**, with primaryExchange derived from the §3 table. Rejected: SMART support varies by venue; non-US venues frequently require direct routing. The US-only scope is empirically correct.
+4. **Codify SMART routing in a separate `IBSmartResolver` class** (subclass of `IBInstrumentResolver` mirroring the probe-local `_SmartUsResolver`). Rejected: the production resolver should always do the right thing for production; subclass just for the SMART path is needless ceremony.
+
+### Consequences
+
+- **Positive:** Phase 1 A3 (TQQQ / TMF / IEF on US venues) routes via SMART → no precaution dance, no operator-side bypass dependency for US-equity orders, follows IB best practice. Future US-equity strategies (any A1 / A2 / A3 instance on NASDAQ / NYSE) inherit the convention.
+- **Negative:** `DD-7 §3` table grows a column. The probe-local `_SmartUsResolver` retains as fallback documentation.
+- **Risk:** SMART routing is opaque about which actual exchange the order routes to (the IB router decides per its internal scoring). For audit / parity purposes the realised execution venue is in the `Fill.execution.exchange` field at fill time — visible but not pre-determined. The discipline accepts this trade-off (matches IB recommended practice).
+- **Follow-ups:**
+  - M2-IB.6.1 ships the resolver code change + tests (existing `test_instrument_resolver.py` adds rows for XNAS/XNYS/ARCX/BATS spot equities).
+  - DD-7 §3 amendment in this commit.
+  - `scripts/probe_ib_submit.py` updates: remove the `_SmartUsResolver` workaround once the production resolver is updated, or keep it as a documentation comment of "this is what the production resolver does for US equities". Decided at M2-IB.6.1 implementation.
+  - The Saturday-2026-05-02 `M2-IB.4a-happy-cacpa` validation (which used the operator's API → Precautions bypass for direct-routed CAC.PA) stays valid — that path is for non-US venues where SMART isn't an option. The bypass is still useful for those.
+
+### Cross-References
+
+- [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) — resolution policy this refines.
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — strategy that needs this convention.
+- [ADR-040](#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway) — Phase 1 IB Gateway target; SMART routing is unaffected by this.
+- [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) — table amended in same commit.
+- `scripts/probe_ib_submit.py` `_SmartUsResolver` — prototype pattern.
+- [INV-14 §"Open Questions"](../inv/ib_error_codes.md#open-questions) — flagged the SMART convention as a planning concern; this ADR settles it.
+- `M2-IB.4a-rejected` wire finding (commit `7d64c47`) — original 10311 observation.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -1990,3 +2150,4 @@ A3's mechanics (per [KB-5 §2 A3](../kb/strategy_taxonomy.md#a3--multi-instrumen
 - **v0.12 (2026-05-01)** — M2-IB.3a-resolved milestone flips. ADR-032 (instrument resolution policy `blive.Instrument` ↔ IB `Contract` / `ConID`) PROPOSED → ACCEPTED: `IBInstrumentResolver` exercised against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` 2026-05-01) and resolved Phase 1 instrument cleanly (`CAC.PA` → `conId=11183823`). Body of ADR-032 unchanged (append-only); status field flipped + PROPOSED→ACCEPTED date trail added in the ADR header. Added ADR-041 (Yahoo-suffix translation in IB instrument resolver) — drafted PROPOSED then ACCEPTED in same commit per established same-day-ACCEPTED pattern; refines ADR-032 with the EODHD/Yahoo `.PA` suffix-stripping rule discovered when the first probe attempt failed with IB error 200 on `CAC.PA`. Yahoo-suffix table seeded for `XPAR/.PA`, `XLON/.L`, `XETR/.DE`, `XAMS/.AS`. The broker-neutral `Instrument` keeps its EODHD-friendly form per ADR-004; only the IB resolver translates. **All ADRs accepted as of v0.12**: ADR-001..041 ACCEPTED. No PROPOSED ADRs remain.
 - **v0.13 (2026-05-02)** — methodology-amendment batch. Added ADR-042 (session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point) — drafted PROPOSED then ACCEPTED same-session per established pattern; extends ADR-026 by operationalising the L0 layer with a static manual-baseline implementation (a project-root markdown file the harness auto-loads). First instance lands as [`CLAUDE.md`](../../CLAUDE.md). Companion edits in this batch: [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) extended to identify the bootstrap-file pattern as the manual L0 baseline; [CONTEXT_INVENTORY §1](../../CONTEXT_INVENTORY.md) gains a "0. Bootstrap" row for `CLAUDE.md` and §7 file-layout updated; [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) Amendment v0.3 records paper-section guidance for the next iteration of `cognitive_cartography.tex`. **All ADRs accepted as of v0.13**: ADR-001..042 ACCEPTED. (Note: ADR-040 + ADR-041 were the most-recent prior IDs; ADR-042 is the next monotonic id.)
 - **v0.14 (2026-05-02)** — Phase 1 strategy switch. Added ADR-043 (Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2)) — drafted PROPOSED then ACCEPTED same-session. Phase 1 strategy is now A3 (TQQQ / TMF / IEF, daily rebalance, T+1 open). ADR-021 (CAC ETF proxy) status flipped ACCEPTED → SUPERSEDED-BY-ADR-043; the CAC.PA Instrument + Yahoo-suffix translation per ADR-041 + DD-7 §3 / §3.1 substrate stay durable (CAC.PA is wire-validated end-to-end at `M2-IB.4a-happy-cacpa` and may revive as a future strategy / comparison instrument). NAV slice unchanged at 5–10% per ADR-020. A2 (`tkan_v4_momentum_timing`) — code stays in repo, marked DEFERRED-NO-TARGET in INV-1 / KB-5. Companion ADRs (044 multi-instrument pipeline, 045 LongShortPortfolio dispatch, 046 IB SMART for US equities) follow in the next commit. Substrate updates in this batch: KB-5 §7 phased priority reordered, INV-1 A2/A3 phase columns swapped, TASK_REGISTRY M2-IB.5 closed at architectural surface + M2-IB.6 scope opened with sub-milestones .6.1 / .6.2 / .6-close, CONTEXT_INVENTORY §10 / status banner updated.
+- **v0.15 (2026-05-02)** — M2-IB.6-substrate batch 2/2: companion ADRs to ADR-043. Added ADR-044 (multi-instrument pipeline support — `instruments: list[Instrument]` + `target_weights_series: pd.DataFrame`; ships at M2-IB.6.1), ADR-045 (LongShortPortfolio btest dispatch — extends ADR-030's per-archetype pattern; lights up `compute_target_weights_for_date()` for A3 / A1 / A1a), ADR-046 (IB resolver SMART routing for US equities — codifies the probe-local `_SmartUsResolver` workaround into the production `IBInstrumentResolver`; XNAS / XNYS / ARCX / BATS spot equities now route via `exchange="SMART"` + `primaryExchange` hint; refines ADR-032). All three drafted PROPOSED then ACCEPTED same-session. DD-7 §3 amended in same commit (US ETF venues gain a `primaryExchange` column; SMART convention documented). M2-IB.6-substrate complete; .6.1 (code) opens next.
