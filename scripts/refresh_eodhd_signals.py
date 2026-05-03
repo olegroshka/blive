@@ -120,8 +120,14 @@ _CLOSE_TIME_UTC = time(15, 30, tzinfo=timezone.utc)
 # EODHD ticker -> IB symbol. Order is load-bearing: matches the canonical
 # eligibility column order (QQL3 [3x QQQ analogue], IBTL [TLT/TMF analogue
 # at 1x], IBTM [IEF analogue]).
+#
+# Vendor-specific symbol divergence: EODHD lists WisdomTree NASDAQ 100
+# 3x Daily Leveraged USD class on LSE as ``QQQ3.LSE``; IB Trader
+# Workstation lists the same instrument as ``QQL3`` (operator-confirmed
+# at M2-IB.6.1 — IB and EODHD use different vendor codes for this ETP).
+# IBTL / IBTM share the same code on both sides.
 _TRADABLE_EODHD_TO_IB: dict[str, str] = {
-    "QQL3.LSE": "QQL3",
+    "QQQ3.LSE": "QQL3",
     "IBTL.LSE": "IBTL",
     "IBTM.LSE": "IBTM",
 }

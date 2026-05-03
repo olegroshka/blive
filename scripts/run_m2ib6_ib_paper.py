@@ -119,8 +119,18 @@ log = logging.getLogger("m2ib6")
 # 20+yr US Treasury UCITS — no UK-listed 3× US Treasury exists, so the
 # leg's leverage drops 3×→1× and the strategy regime profile shifts
 # accordingly per ADR-047) for TMF, and IBTM (LSE; 1× 7-10yr US Treasury
-# UCITS) for IEF. All three are USD-denominated on LSE; the IB resolver
-# maps XLON venue per DD-7 §3.
+# UCITS) for IEF.
+#
+# Currency caveat (M2-IB.6.1 wire-probe finding, post-ADR-047): IB
+# exposes IBTL / IBTM on LSE only as **GBP-hedged** share classes (the
+# bare IBTL / IBTM symbols on LSEETF resolve to "ISHARES USD TRES 20+yr"
+# / "ISHARES USD TREASURY 7-10Y" GBP-hedged accumulating tranches —
+# conIds 181150859 / 68489974). QQL3 trades USD-denominated on LSEETF
+# (conId 566361457). Phase 1 P&L is therefore mixed-currency (USD on
+# the QQL3 leg, GBP on the IBTL/IBTM legs); the strategy parity envelope
+# re-derives at M7. The IB resolver routes XLON+ETF via SMART with
+# primaryExchange="LSEETF" (not the main-book "LSE") per DD-7 §3
+# discriminator added at M2-IB.6.1.
 _QQL3 = Instrument(
     symbol="QQL3",
     venue="XLON",
@@ -132,7 +142,7 @@ _QQL3 = Instrument(
 _IBTL = Instrument(
     symbol="IBTL",
     venue="XLON",
-    currency="USD",
+    currency="GBP",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
     tradability="spot",
@@ -140,7 +150,7 @@ _IBTL = Instrument(
 _IBTM = Instrument(
     symbol="IBTM",
     venue="XLON",
-    currency="USD",
+    currency="GBP",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
     tradability="spot",

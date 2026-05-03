@@ -89,6 +89,21 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
 _US_SMART_VENUES: frozenset[str] = frozenset({"XNAS", "XNYS", "ARCX", "BATS"})
 
 
+# LSE ETF / ETP venue: WisdomTree / iShares UCITS-ETPs on LSE are not
+# accessible via the bare ``"LSE"`` direct exchange (IB error 200). They
+# trade on IB's separate ``"LSEETF"`` venue. Probed at M2-IB.6.1 against
+# the Phase 1 universe (QQL3 / IBTL / IBTM): all three resolve via
+# ``Contract(exchange="SMART", primaryExchange="LSEETF")`` regardless of
+# share-class currency. Mirrors the ADR-046 SMART pattern for US equities.
+#
+# Discriminator: ``venue == "XLON" AND asset_class == ETF AND
+# tradability == "spot"`` -> SMART + primaryExchange=LSEETF. XLON +
+# EQUITY (single-name UK shares) keeps direct ``"LSE"`` routing per the
+# existing _MIC_TO_IB_EXCHANGE table — the LSE main book and LSE ETF
+# book are distinct IB venues.
+_LSE_ETF_SMART_PRIMARY = "LSEETF"
+
+
 # Asset classes that participate in the SMART convention. Options /
 # futures grow their own routing table when those asset classes land
 # (per DD-7 §3 SMART discriminator note).
@@ -226,12 +241,19 @@ class IBInstrumentResolver:
         # _MIC_TO_IB_EXCHANGE value is the primaryExchange hint and the
         # Contract.exchange is "SMART"; otherwise it's the routing exchange
         # directly.
+        #
+        # XLON ETFs route via SMART with primaryExchange="LSEETF" (not the
+        # main-book "LSE") — IB exposes LSE-listed UCITS ETPs on a distinct
+        # venue. Probed at M2-IB.6.1; see :data:`_LSE_ETF_SMART_PRIMARY`.
         if (
             instrument.venue in _US_SMART_VENUES
             and instrument.asset_class in _SMART_ELIGIBLE_ASSET_CLASSES
         ):
             exchange = "SMART"
             primary_exchange = ib_exchange_value
+        elif instrument.venue == "XLON" and instrument.asset_class == AssetClass.ETF:
+            exchange = "SMART"
+            primary_exchange = _LSE_ETF_SMART_PRIMARY
         else:
             exchange = ib_exchange_value
             primary_exchange = ""  # IB convention: empty string when not SMART-routed.
