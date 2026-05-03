@@ -4,33 +4,41 @@ Operationalises [ADR-043](../docs/decisions/DECISIONS.md#adr-043--phase-1-strate
 + [ADR-044](../docs/decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043)
 + [ADR-045](../docs/decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030)
 + [ADR-046](../docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032)
++ [ADR-047](../docs/decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043)
 end-to-end. Wires:
 
-1. **5 EODHD parquets** (TQQQ / TMF / IEF / QQQ / TLT) loaded via
-   :class:`PaperMarketData`. Three of those are tradables; QQQ + TLT
-   were the trend-signal tickers used by `refresh_eodhd_signals.py` and
-   are not traded here (the eligibility was computed offline).
+1. **5 EODHD parquets** (QQL3 / IBTL / IBTM / QQQ / TLT) loaded via
+   :class:`PaperMarketData`. Three of those are tradables (UK-listed
+   PRIIPs-compliant analogues per ADR-047 — the original notebook's
+   TQQQ / TMF / IEF are PRIIPs-blocked from UK retail accounts; see
+   INV-14 v0.5 for the error 201 KID-variant). QQQ + TLT are the
+   trend-signal tickers used by `refresh_eodhd_signals.py` (signal-only,
+   never traded — PRIIPs does not apply).
 2. **Eligibility signals parquet** loaded from
    ``~/.blive/data/signals/triple_lev_sma_eligible.parquet`` (produced
-   by `scripts/refresh_eodhd_signals.py`).
+   by `scripts/refresh_eodhd_signals.py` with columns QQL3 / IBTL /
+   IBTM in IB-symbol order).
 3. **Target weights** via
    :func:`blive.runtime.signals.eligibility_to_target_weights` — the
    LongShortPortfolio + MaskSelector + EqualWeight semantics applied
    per row.
 4. **`IBBroker`** with the production :class:`IBInstrumentResolver`
-   (SMART routing for the US-equity venues per ADR-046) connecting to
-   IB Paper Gateway.
+   (XLON venue → SMART or direct-routed, per the resolver's venue-MIC
+   handling) connecting to IB Paper Gateway.
 5. **`run_ib_multi_pipeline`** orchestrates the rebalance loop.
 
 Pipeline-mechanics test, **not** a parity-meaningful run. Orders submitted
 to IB Paper fill at the venue's *current* market, not at the historical
 bar's close — the equity curve informs FSM correctness and integration
-health, not strategy quality. The full real-time-clock multi-day
+health, not strategy quality. Note also that IBTL is **1× leverage** (not
+3× — no UK-listed 3× US-Treasury ETP exists per ADR-047) so the strategy's
+risk-on regime profile shifts vs. the notebook's TMF leg; the parity
+envelope re-derives at M7. The full real-time-clock multi-day
 "≥ 5 trading days" run is the M5+ daemon shape.
 
 Defaults:
 
-- Order type **MKT** (guaranteed FSM termination during US RTH).
+- Order type **MKT** (guaranteed FSM termination during LSE RTH).
 - ``--max-bars 60`` (~3 months of daily bars; eligibility computation
   needs ~SMA-200 of warmup so the parquet's earlier history is the
   warmup, the last N bars are replayed).
@@ -41,14 +49,15 @@ Operator prereqs (per `M2-IB.4a-happy-cacpa`):
 
 - IB Gateway running on the configured port (default 4002 paper).
 - "Read-Only API" unchecked.
-- For US equities via SMART (per ADR-046), the
-  "Bypass Order Precautions for API Orders" toggle is **not strictly
-  required** since SMART routing avoids the direct-routing precaution
-  at error 10311. Belt-and-braces — keep it ticked from the M2-IB.4a
-  setup.
+- For LSE-listed UCITS / ETPs the
+  "Bypass Order Precautions for API Orders" toggle is **recommended on**
+  (matches the M2-IB.4a-happy-cacpa setup); LSE direct-routing does not
+  trigger the SMART-vs-direct error 10311 cascade since LSE is the
+  primary venue.
 - ``~/.blive/secrets/ib.env`` populated.
-- ``~/.blive/data/eodhd/{ticker}_1d.parquet`` for all 5 tickers,
-  produced by `scripts/refresh_eodhd_signals.py`.
+- ``~/.blive/data/eodhd/{ib_symbol}_1d.parquet`` for all 5 IB symbols
+  (QQL3 / IBTL / IBTM / QQQ / TLT), produced by
+  `scripts/refresh_eodhd_signals.py`.
 - ``~/.blive/data/signals/triple_lev_sma_eligible.parquet`` produced
   by the same script.
 
@@ -105,36 +114,38 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("m2ib6")
 
 
-# Phase 1 instruments per ADR-043. The IB SMART resolver per ADR-046
-# routes XNAS / XNYS / ARCX spot ETFs via SMART with primaryExchange
-# hint. TMF's primary listing is ARCA (NYSE Arca), TQQQ is NASDAQ, IEF
-# is NASDAQ Global Select. SMART routing accommodates all three; the
-# venue MIC is the primaryExchange hint.
-_TQQQ = Instrument(
-    symbol="TQQQ",
-    venue="XNAS",
+# Phase 1 instruments per ADR-043 + ADR-047. The PRIIPs-compliant
+# substitution is QQL3 (LSE; 3× Nasdaq-100 ETP) for TQQQ, IBTL (LSE; 1×
+# 20+yr US Treasury UCITS — no UK-listed 3× US Treasury exists, so the
+# leg's leverage drops 3×→1× and the strategy regime profile shifts
+# accordingly per ADR-047) for TMF, and IBTM (LSE; 1× 7-10yr US Treasury
+# UCITS) for IEF. All three are USD-denominated on LSE; the IB resolver
+# maps XLON venue per DD-7 §3.
+_QQL3 = Instrument(
+    symbol="QQL3",
+    venue="XLON",
     currency="USD",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
     tradability="spot",
 )
-_TMF = Instrument(
-    symbol="TMF",
-    venue="ARCX",
+_IBTL = Instrument(
+    symbol="IBTL",
+    venue="XLON",
     currency="USD",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
     tradability="spot",
 )
-_IEF = Instrument(
-    symbol="IEF",
-    venue="XNAS",
+_IBTM = Instrument(
+    symbol="IBTM",
+    venue="XLON",
     currency="USD",
     asset_class=AssetClass.ETF,
     multiplier=Decimal("1"),
     tradability="spot",
 )
-_TRADABLES: list[Instrument] = [_TQQQ, _TMF, _IEF]
+_TRADABLES: list[Instrument] = [_QQL3, _IBTL, _IBTM]
 
 
 def _default_eodhd_dir() -> Path:
@@ -204,7 +215,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "End-to-end M2-IB.6 paper-test driver: triple_lev_sma_filter_dsl "
-            "(TQQQ/TMF/IEF) x IB Paper, multi-instrument pipeline."
+            "(QQL3/IBTL/IBTM, Phase 1 PRIIPs-compliant universe per ADR-047) x "
+            "IB Paper, multi-instrument pipeline."
         ),
     )
     parser.add_argument(
@@ -212,7 +224,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Directory containing the per-ticker EODHD parquets (TQQQ / TMF / IEF / "
+            "Directory containing the per-ticker EODHD parquets (QQL3 / IBTL / IBTM / "
             "QQQ / TLT)_1d.parquet. Default: ~/.blive/data/eodhd/"
         ),
     )
@@ -333,9 +345,9 @@ async def _run(args: argparse.Namespace) -> int:
     # Build PaperMarketData with the 3 tradable parquets.
     fixtures = {inst: eodhd_dir / f"{inst.symbol}_1d.parquet" for inst in _TRADABLES}
     md = PaperMarketData(fixtures=fixtures)
-    canonical_bars = md.bars(_TRADABLES[0])  # TQQQ canonical
+    canonical_bars = md.bars(_TRADABLES[0])  # QQL3 canonical
     print(
-        f"  bars (TQQQ canonical): {len(canonical_bars)} ({canonical_bars[0].close_time_utc.date()} -> {canonical_bars[-1].close_time_utc.date()})"
+        f"  bars (QQL3 canonical): {len(canonical_bars)} ({canonical_bars[0].close_time_utc.date()} -> {canonical_bars[-1].close_time_utc.date()})"
     )
 
     # Load eligibility signals + compute target weights.
@@ -344,6 +356,14 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"\nFAILED: signals parquet at {signals_path} is empty.")
         await broker.disconnect()
         return 5
+    # Defensive: older eligibility parquets may have a tz-naive index
+    # (built from .values in earlier refresh script versions). Force
+    # tz-aware UTC so the downstream intersection with canonical bar
+    # timestamps doesn't silently come up empty.
+    eligibility_index = pd.DatetimeIndex(eligibility_df.index)
+    if eligibility_index.tz is None:
+        eligibility_index = eligibility_index.tz_localize("UTC")
+    eligibility_df.index = eligibility_index
     target_weights_full = eligibility_to_target_weights(eligibility_df)
 
     # Cap the replay window to --max-bars by trimming the canonical bars and

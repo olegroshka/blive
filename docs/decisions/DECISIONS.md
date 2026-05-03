@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-05-02
-version: 0.15
+last_reviewed: 2026-05-03
+version: 0.16
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -74,6 +74,7 @@ referenced_by:
 | [ADR-044](#adr-044--multi-instrument-pipeline-support-companion-to-adr-043) | Multi-instrument pipeline support (companion to ADR-043) | ACCEPTED | 2026-05-02 | — |
 | [ADR-045](#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) | LongShortPortfolio btest dispatch (extends ADR-030) | ACCEPTED | 2026-05-02 | — |
 | [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) | IB resolver SMART routing for US equities (refines ADR-032) | ACCEPTED | 2026-05-02 | — |
+| [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) | PRIIPs-compliant universe for Phase 1 A3 strategy (refines ADR-043) | ACCEPTED | 2026-05-03 | — |
 
 ---
 
@@ -2134,6 +2135,78 @@ The production `IBInstrumentResolver` routes US-equity venues via SMART:
 
 ---
 
+## ADR-047 — PRIIPs-compliant universe for Phase 1 A3 strategy (refines ADR-043)
+
+- **status:** ACCEPTED
+- **date:** 2026-05-03
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)
+
+### Context
+
+[ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) picked the `triple_lev_sma_filter_dsl` strategy with universe TQQQ / TMF / IEF (US-domiciled ETFs). The M2-IB.6.1 architectural-surface wire run on 2026-05-03 against the operator's IB UK paper account submitted 104 orders across the 3 tradables — all rejected with **IB error 201**, reason text:
+
+> *"No Trading Permission, Customer Ineligible; Ineligibility reasons: This product does not have a KID in English or in a language approved for your country. Retail clients can trade packaged retail products only if an appropriate KID is available."*
+
+This is **PRIIPs / KID regulation** — the EU/UK rule (still in force in UK post-Brexit) that requires a Key Information Document (KID) in the consumer's language for any "packaged retail product" sold to retail clients. US-domiciled ETFs typically do not file KIDs in the UK; UK retail accounts therefore cannot trade them. The operator's IB UK paper account mirrors UK retail-client restrictions.
+
+The wire run validated the multi-instrument pipeline + SMART routing + REJECTED disambiguation cleanly (104 round trips, 0 breaches, FSM correct throughout) — the blocker is purely regulatory, not a blive-side bug.
+
+### Decision
+
+The Phase 1 A3 universe substitutes UK-listed PRIIPs-compliant analogues:
+
+| Original (US) | Phase 1 substitute (UK) | Notes |
+|---|---|---|
+| **TQQQ** (Direxion 3× QQQ) | **QQL3** (LSE — 3× Long Nasdaq 100 ETP, PRIIPs-compliant) | 3× leverage preserved. ETP rather than UCITS; KID filed for UK retail. Operator-confirmed tradable on IB UK paper 2026-05-03. |
+| **TMF** (Direxion 3× 20+y Treasury) | **IBTL** (LSE — iShares $ Treasury Bond 20+yr UCITS ETF, PRIIPs-compliant) | **1× leverage** — no UK-listed 3× US-Treasury ETP exists per operator's IB lookup. **Strategy regime change**: the TMF leg's leverage drops from 3× to 1×; backtest CAGR / Sharpe / max-DD from `triple_leveraged_etf_dsl.ipynb` no longer carry forward exactly. The strategy's risk balance shifts from 50/50 to roughly 75/25 (risk-on/risk-off), since the equity leg keeps 3× while the bond leg loses 2/3 of its leverage. Operator-acknowledged trade-off in exchange for strategy executability on the UK retail account. |
+| **IEF** (iShares 7-10y Treasury) | **IBTM** (LSE — iShares $ Treasury Bond 7-10yr UCITS ETF, PRIIPs-compliant) | Direct UCITS analogue. Operator-confirmed tradable. |
+
+**Trend signals unchanged**: the strategy still uses **QQQ** (Nasdaq-100 ETF) and **TLT** (20+y Treasury ETF) closes from EODHD as the SMA-200 trend-filter inputs. These tickers are *never traded* — they are signal-only — so PRIIPs / KID does not apply.
+
+**Venue**: all three tradables are on **LSE (XLON)**, direct-routed per [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) (XLON is not in the US-SMART set per [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032)). The "Bypass Order Precautions for API Orders" toggle the operator already has ticked (per `M2-IB.4a-happy-cacpa`) covers any LSE direct-routing precaution.
+
+**Currency**: USD (all three are USD-priced share classes on LSE; the operator's account base GBP triggers IB's automatic FX conversion at fill time).
+
+### Alternatives Considered
+
+1. **Margin-finance the bond leg per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) to synthesise 3× exposure on the 1× IBTL.** Rejected — requires RC-01 (max gross leverage) / RC-04 (daily-loss thresholds) RiskEngine widening which is M4+ scope. The 1× substitution accepts the regime change in exchange for Phase-1-feasibility.
+2. **Apply for IB Professional Client status to bypass PRIIPs.** Rejected per operator — not applying at this time.
+3. **Substitute a different non-Treasury bond leg with an available 3× UK ETP** (if any existed). Rejected — would change the strategy's safe-haven semantics materially, and no clean substitute exists on UK retail venues per the operator's IB lookup.
+4. **Drop the bond leg entirely, run a single-instrument leveraged-equity strategy (QQL3 only).** Rejected — collapses the archetype to A2 (single-instrument timing), defeating the multi-instrument pipeline / LongShortPortfolio dispatch / IEF safe-haven park work in M2-IB.6.1.
+5. **Pivot back to A2 / CAC.PA per ADR-021 (which is PRIIPs-compliant).** Rejected — A3 was deliberately picked per ADR-043 as the first live-trading candidate; reverting forfeits the multi-instrument substrate work.
+
+### Consequences
+
+- **Positive:** the strategy is executable on the operator's IB UK retail paper account; M2-IB.6.2 can run with real fills during US / LSE RTH.
+- **Positive:** UK-listed leveraged ETPs / UCITS ETFs are explicitly designed for retail consumption; KID, ESMA fact-sheet, and tracking-error documentation are public — better operational documentation than US analogues for retail use.
+- **Negative — strategy regime change:** the bond leg's 3× → 1× leverage means the article's backtest numbers (CAGR ~24%, Sharpe ~0.88, max DD ~-37% per `triple_leveraged_etf_dsl.ipynb`) do not carry forward. Re-derive the parity envelope at M7 against this universe; the M2-IB.6 paper run is for FSM / pipeline validation, not strategy-quality validation.
+- **Negative — instrument decay characteristics differ:** UK-listed 3× ETPs use synthetic replication (vs Direxion's swap-based US 3× products) which has different decay profile and counterparty exposure. Worth noting as a parity-residual driver.
+- **Risk — IBTL drawdown profile under sustained Treasury sell-off:** without 3× leverage on the bond leg, the strategy spends more time effectively long-equity-only during regime-on periods, since IBTL contributes ~1/3 the volatility a 3× analogue would. RC-04 daily-loss thresholds (M4 work) become more important when the equity leg becomes structurally dominant.
+- **Follow-ups:**
+  - INV-1 strategies row updated: `triple_lev_sma_filter_dsl` Phase 1 universe column reflects the UK substitution + the 1× bond-leg note.
+  - INV-14 grows: error 201 with PRIIPs-KID reason (catalogued explicitly to distinguish from the precaution-cascade variant from M2-IB.4a-rejected).
+  - KB-9 (UK regulatory) gains a §"PRIIPs / KID restrictions" section documenting the rule, the IB error path, and the universe-substitution approach as the pragmatic mitigation.
+  - DD-7 §3 XLON row "Used by" annotation updated to acknowledge Phase 1 UCITS / ETP use (was post-M8 only via ADR-018 UK cash equities).
+  - `scripts/refresh_eodhd_signals.py` updates the tradable ticker list to `QQL3.LSE` / `IBTL.LSE` / `IBTM.LSE` (EODHD format with `.LSE` suffix); trend signals remain US `QQQ` / `TLT`. Per-ticker parquet filenames use the IB symbol (`QQL3_1d.parquet` etc.) so the driver's lookup pattern stays unchanged. The eligibility parquet's column names rename from leg-names (`TQQQ` / `TMF` / `IEF`) to actual tradables (`QQL3` / `IBTL` / `IBTM`) on save so the driver matches by `Instrument.symbol`.
+  - `scripts/run_m2ib6_ib_paper.py` updates the `_TQQQ` / `_TMF` / `_IEF` Instrument records to `_QQL3` / `_IBTL` / `_IBTM` with `venue="XLON"`, `currency="USD"`.
+  - `triple_lev_sma_eligibility` runtime function unchanged — its column names are *leg identifiers* (TQQQ / TMF / IEF) which abstract over the strategy's leg semantics. The refresh script does the leg-to-tradable rename when persisting.
+
+### Cross-References
+
+- [ADR-013](#adr-013--v1-scope-etf-and-index-strategies-only) — v1 ETF/index scope (still holds; the new universe is ETFs / ETPs).
+- [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) — leverage paths; A3 originally targeted the leveraged-ETF path on both legs; ADR-047's IBTL substitution mixes paths (leveraged ETP on equity leg, 1× ETF on bond leg).
+- [ADR-019](#adr-019--a3-archetype-generalises-to-other-leveraged-etf-pairs) — A3 generalises; this ADR is a concrete instance of that generalisation.
+- [ADR-020](#adr-020--phase-1-nav-slice-510-of-total-cap-10) — NAV slice unchanged.
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — Phase 1 strategy switch (refined here).
+- [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) — SMART discriminator scoped to US venues; XLON stays direct-routed (correct for these LSE ETPs).
+- [INV-14](../inv/ib_error_codes.md) — error 201 with PRIIPs-KID reason catalogued in same commit batch.
+- [KB-9](../kb/uk_regulatory.md) — PRIIPs / KID restrictions section added.
+- [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) — XLON row annotation updated.
+- M2-IB.6.1 wire-run finding (2026-05-03; output saved at `~/AppData/Local/Temp/claude/.../tasks/brktw77np.output`) — empirical observation that motivated this ADR.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2151,3 +2224,4 @@ The production `IBInstrumentResolver` routes US-equity venues via SMART:
 - **v0.13 (2026-05-02)** — methodology-amendment batch. Added ADR-042 (session-bootstrap files: agent-agnostic pattern for L0 warm-up entry point) — drafted PROPOSED then ACCEPTED same-session per established pattern; extends ADR-026 by operationalising the L0 layer with a static manual-baseline implementation (a project-root markdown file the harness auto-loads). First instance lands as [`CLAUDE.md`](../../CLAUDE.md). Companion edits in this batch: [CONTEXT_PROTOCOL §11.2](../../CONTEXT_PROTOCOL.md) extended to identify the bootstrap-file pattern as the manual L0 baseline; [CONTEXT_INVENTORY §1](../../CONTEXT_INVENTORY.md) gains a "0. Bootstrap" row for `CLAUDE.md` and §7 file-layout updated; [`docs/method/Amendments_Log.md`](../method/Amendments_Log.md) Amendment v0.3 records paper-section guidance for the next iteration of `cognitive_cartography.tex`. **All ADRs accepted as of v0.13**: ADR-001..042 ACCEPTED. (Note: ADR-040 + ADR-041 were the most-recent prior IDs; ADR-042 is the next monotonic id.)
 - **v0.14 (2026-05-02)** — Phase 1 strategy switch. Added ADR-043 (Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2)) — drafted PROPOSED then ACCEPTED same-session. Phase 1 strategy is now A3 (TQQQ / TMF / IEF, daily rebalance, T+1 open). ADR-021 (CAC ETF proxy) status flipped ACCEPTED → SUPERSEDED-BY-ADR-043; the CAC.PA Instrument + Yahoo-suffix translation per ADR-041 + DD-7 §3 / §3.1 substrate stay durable (CAC.PA is wire-validated end-to-end at `M2-IB.4a-happy-cacpa` and may revive as a future strategy / comparison instrument). NAV slice unchanged at 5–10% per ADR-020. A2 (`tkan_v4_momentum_timing`) — code stays in repo, marked DEFERRED-NO-TARGET in INV-1 / KB-5. Companion ADRs (044 multi-instrument pipeline, 045 LongShortPortfolio dispatch, 046 IB SMART for US equities) follow in the next commit. Substrate updates in this batch: KB-5 §7 phased priority reordered, INV-1 A2/A3 phase columns swapped, TASK_REGISTRY M2-IB.5 closed at architectural surface + M2-IB.6 scope opened with sub-milestones .6.1 / .6.2 / .6-close, CONTEXT_INVENTORY §10 / status banner updated.
 - **v0.15 (2026-05-02)** — M2-IB.6-substrate batch 2/2: companion ADRs to ADR-043. Added ADR-044 (multi-instrument pipeline support — `instruments: list[Instrument]` + `target_weights_series: pd.DataFrame`; ships at M2-IB.6.1), ADR-045 (LongShortPortfolio btest dispatch — extends ADR-030's per-archetype pattern; lights up `compute_target_weights_for_date()` for A3 / A1 / A1a), ADR-046 (IB resolver SMART routing for US equities — codifies the probe-local `_SmartUsResolver` workaround into the production `IBInstrumentResolver`; XNAS / XNYS / ARCX / BATS spot equities now route via `exchange="SMART"` + `primaryExchange` hint; refines ADR-032). All three drafted PROPOSED then ACCEPTED same-session. DD-7 §3 amended in same commit (US ETF venues gain a `primaryExchange` column; SMART convention documented). M2-IB.6-substrate complete; .6.1 (code) opens next.
+- **v0.16 (2026-05-03)** — PRIIPs-compliant universe for Phase 1. Added ADR-047 (PRIIPs-compliant universe for Phase 1 A3 strategy — refines ADR-043). The 2026-05-03 M2-IB.6.1 architectural-surface wire run surfaced IB error 201 with PRIIPs-KID reason on every order against the US-domiciled TQQQ / TMF / IEF tickers — UK retail accounts cannot trade products without UK-filed Key Information Documents. ADR-047 substitutes UK-listed PRIIPs-compliant analogues: QQL3 (LSE, 3× Nasdaq 100 ETP), IBTL (LSE, iShares $ Treasury Bond 20+yr UCITS — **1× not 3×**, no UK-listed 3× US-Treasury exists), IBTM (LSE, iShares $ Treasury Bond 7-10yr UCITS). Trend signals (QQQ / TLT) unchanged — signal-only, not traded. Strategy regime shifts from 3×/3× to 3×/1× across the legs; backtest numbers don't carry forward exactly. Pipeline / FSM / SMART routing all validated correctly in the wire run; the blocker is regulatory, not technical. Companion edits in same commit batch: INV-14 (error 201 PRIIPs-KID variant catalogued alongside the precaution-cascade variant), KB-9 (new §"PRIIPs / KID restrictions" section), DD-7 §3 (XLON row "Used by" annotation updated for Phase 1 use), INV-1 (Phase 1 row universe column updated), refresh_eodhd_signals.py + run_m2ib6_ib_paper.py code updates for the new tickers.

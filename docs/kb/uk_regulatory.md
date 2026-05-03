@@ -3,8 +3,8 @@ id: KB-9
 title: UK Regulatory Inventory (light)
 status: DRAFT
 owner: Oleg primary, Claude assist
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-05-03
+version: 0.2
 sources:
   - https://www.fca.org.uk/                               # accessed 2026-04-26
   - https://www.gov.uk/hmrc                               # accessed 2026-04-26
@@ -101,6 +101,24 @@ UK MAR applies to **everyone**, including personal traders. Relevant to blive:
 
 ---
 
+## 5.5 PRIIPs / KID restrictions (UK retail clients)
+
+The **Packaged Retail and Insurance-based Investment Products (PRIIPs)** regulation requires a **Key Information Document (KID)** in the consumer's language for any "packaged retail product" sold to retail clients in the EU / UK. UK post-Brexit retains PRIIPs in onshored form. Effect on `blive`'s execution:
+
+- **UK retail accounts cannot trade products without a UK-filed KID.** Most US-domiciled ETFs (e.g. TQQQ, TMF, IEF) do **not** have UK KIDs filed by their issuers and are therefore not tradable from UK retail brokerage accounts.
+- The restriction is enforced **at the broker level**: IB UK rejects retail orders on KID-less products at submission, surfacing **error 201** with reason text containing *"This product does not have a KID in English or in a language approved for your country"* (catalogued in [INV-14](../inv/ib_error_codes.md)).
+- The restriction does **not** apply to:
+  - **UK / Irish-domiciled UCITS ETFs and ETPs** that file KIDs as part of their UCITS / ETP regulatory regime (most LSE-listed iShares / WisdomTree / Lyxor ETPs).
+  - **Direct equities** (PRIIPs covers packaged products, not single-name shares).
+  - **Professional Client** classification (bypasses retail PRIIPs but requires meeting MiFID II "elective professional" criteria — wealth, experience, transaction frequency).
+- For `blive` Phase 1 / M2-IB.6, the strategy universe substituted US ETFs for UK-listed UCITS / ETP analogues per [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043). Trend-signal tickers (QQQ / TLT) are signal-only — never traded — so PRIIPs does not apply to their consumption as factor inputs from EODHD.
+
+**Operational implication for future strategies**: any strategy targeting US ETF universes needs an analogous PRIIPs-compliance check before deployment from a UK retail account. The check is a single-instrument operator-side lookup in IB Trader Workstation: search the symbol; if "trade-restricted: no KID" appears, the product is blocked.
+
+**For blive design**: the engine itself is universe-agnostic; PRIIPs is an instrument-set concern, not an engine concern. Phase 1's universe choice per ADR-047 documents the substitution; future strategies extend the same pattern.
+
+---
+
 ## 6. Data Privacy (UK GDPR)
 
 - blive processes **Oleg's own** trading data; no third-party personal data.
@@ -127,8 +145,11 @@ The list of things Claude **cannot answer authoritatively** and require a UK acc
 
 - [REQUIREMENTS §6.3](../../REQUIREMENTS.md) — security & audit, UK considerations note.
 - [ADR-018](../decisions/DECISIONS.md#adr-018--uk-equity-strategies-deferred-to-post-m8) — UK equity strategies deferred but in-scope later.
+- [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — PRIIPs-compliant universe for Phase 1 A3.
+- [INV-14](../inv/ib_error_codes.md) — IB error 201 PRIIPs-KID variant.
 - [KB-13](companion_projects.md) — ForgeFolio handles personal-finance reporting separately.
 
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial stub. Will be refined when Oleg confirms structure (sole trader vs limited co, etc.).
+- **v0.2 (2026-05-03)** — added §5.5 (PRIIPs / KID restrictions for UK retail clients) per the M2-IB.6.1 wire-run finding catalogued in [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043). Documents the regulation, the IB error-201 surface, the exemption set (UCITS / ETPs / single-name shares / Professional Client classification), and the design implication that PRIIPs is an instrument-set concern rather than an engine concern.

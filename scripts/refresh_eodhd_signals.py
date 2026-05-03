@@ -1,28 +1,43 @@
 """Refresh the M2-IB.6 EODHD data + SMA-eligibility signals parquet.
 
 Operationalises [ADR-043](../docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)'s
-Phase 1 strategy `triple_lev_sma_filter_dsl`. Fetches the 5 tickers it
-needs (3 tradables + 2 trend signals) from EODHD and writes:
+Phase 1 strategy `triple_lev_sma_filter_dsl`, with the universe substituted
+for UK-listed PRIIPs-compliant analogues per
+[ADR-047](../docs/decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043).
+Fetches the 5 tickers it needs (3 tradables + 2 trend signals) from EODHD
+and writes:
 
-1. **5 PaperMarketData parquets** — one per ticker — at
-   ``~/.blive/data/eodhd/{ticker}_1d.parquet``, matching the format
+1. **5 PaperMarketData parquets** — one per IB symbol — at
+   ``~/.blive/data/eodhd/{ib_symbol}_1d.parquet``, matching the format
    :class:`blive.adapters.paper.market_data.PaperMarketData` consumes
    per [ADR-029](../docs/decisions/DECISIONS.md#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet).
+   File names use the IB symbol (no `.LSE` suffix); EODHD is fetched with
+   the `.LSE` suffix where applicable.
 2. **One wide eligibility-signals parquet** at
    ``~/.blive/data/signals/triple_lev_sma_eligible.parquet`` —
-   columns ``TQQQ`` / ``TMF`` / ``IEF`` with float ``0.0`` / ``1.0``
-   values produced by :func:`blive.runtime.signals.triple_lev_sma_eligibility`,
-   matching btest's ``ExternalFactor(per_instrument=True)`` contract
-   (the same shape as ``btest/data/signals/triple_lev_sma_eligible.parquet``
-   that the notebook produces).
+   columns ``QQL3`` / ``IBTL`` / ``IBTM`` (the IB symbols of the Phase 1
+   tradable legs) with float ``0.0`` / ``1.0`` values, derived from the
+   QQQ / TLT trend signals via
+   :func:`blive.runtime.signals.triple_lev_sma_eligibility`. The
+   eligibility function natively returns columns labelled by the
+   notebook's original tradables (TQQQ / TMF / IEF); the driver renames
+   them to the IB symbols before persisting so downstream consumers
+   (driver + tests) reference instruments by their IB symbol throughout.
 
 Five tickers fetched:
 
-- **TQQQ** — 3× QQQ leveraged ETF (NASDAQ; tradable in the strategy).
-- **TMF** — 3× TLT 20+y Treasury leveraged ETF (NYSE; tradable).
-- **IEF** — 7-10y Treasury ETF (NASDAQ; safe-haven park; tradable).
-- **QQQ** — Nasdaq-100 ETF (NASDAQ; trend signal for TQQQ leg only).
-- **TLT** — 20+y Treasury ETF (NASDAQ; trend signal for TMF leg only).
+- **QQL3.LSE** — 3× Nasdaq-100 leveraged ETP (LSE; tradable; TQQQ analogue).
+- **IBTL.LSE** — iShares $ Treasury 20+yr UCITS ETF (LSE; **1× not 3×**;
+  tradable; TMF analogue — there is no UK-listed 3× US-Treasury ETP, so
+  the leg's effective leverage drops 3×→1×; the strategy's regime profile
+  shifts accordingly per ADR-047).
+- **IBTM.LSE** — iShares $ Treasury 7-10yr UCITS ETF (LSE; tradable; IEF
+  analogue).
+- **QQQ** — Nasdaq-100 ETF (US; trend signal for the TQQQ-analogue leg
+  only; signal-only consumption — never traded — so PRIIPs / KID does
+  not apply).
+- **TLT** — 20+y Treasury ETF (US; trend signal for the TMF-analogue leg
+  only; signal-only).
 
 Usage::
 
@@ -88,16 +103,51 @@ _OPEN_TIME_UTC = time(9, 0, tzinfo=timezone.utc)
 _CLOSE_TIME_UTC = time(15, 30, tzinfo=timezone.utc)
 
 
-# --- M2-IB.6 ticker set per ADR-043 -----------------------------------------
+# --- M2-IB.6 ticker set per ADR-043 + ADR-047 -------------------------------
 #
 # Three tradables + two trend signals. Order matters for output stability
 # (PaperMarketData parquets get written in this order; signals parquet
-# always has columns TQQQ / TMF / IEF in that canonical order per the
-# triple_lev_sma_eligibility contract).
+# always has columns in IB-symbol order: QQL3 / IBTL / IBTM).
+#
+# Tradables are UK-listed UCITS / ETP analogues per ADR-047 (the original
+# notebook's TQQQ / TMF / IEF are PRIIPs-blocked from UK retail accounts;
+# error 201 KID-variant catalogued in INV-14 v0.5). EODHD ticker uses the
+# `.LSE` suffix; the IB symbol used by IBInstrumentResolver, the
+# parquet filename, and the eligibility column header is the bare symbol
+# (no suffix). Trend signals (QQQ / TLT) remain US-listed — they are
+# signal-only consumption, never traded, so PRIIPs does not apply.
 
-_TRADABLES: tuple[str, ...] = ("TQQQ", "TMF", "IEF")
+# EODHD ticker -> IB symbol. Order is load-bearing: matches the canonical
+# eligibility column order (QQL3 [3x QQQ analogue], IBTL [TLT/TMF analogue
+# at 1x], IBTM [IEF analogue]).
+_TRADABLE_EODHD_TO_IB: dict[str, str] = {
+    "QQL3.LSE": "QQL3",
+    "IBTL.LSE": "IBTL",
+    "IBTM.LSE": "IBTM",
+}
+_TRADABLE_EODHD: tuple[str, ...] = tuple(_TRADABLE_EODHD_TO_IB.keys())
+_TRADABLE_IB: tuple[str, ...] = tuple(_TRADABLE_EODHD_TO_IB.values())
 _TREND_SIGNALS: tuple[str, ...] = ("QQQ", "TLT")
-_ALL_TICKERS: tuple[str, ...] = _TRADABLES + _TREND_SIGNALS
+_ALL_EODHD_TICKERS: tuple[str, ...] = _TRADABLE_EODHD + _TREND_SIGNALS
+
+# Rename map applied to the eligibility frame returned by
+# triple_lev_sma_eligibility — its native column labels are the notebook's
+# original tradables (TQQQ / TMF / IEF). Persisted parquet uses IB symbols
+# so the driver and downstream tooling reference instruments by IB symbol
+# end-to-end.
+_ELIGIBILITY_COLUMN_RENAME: dict[str, str] = {
+    "TQQQ": "QQL3",
+    "TMF": "IBTL",
+    "IEF": "IBTM",
+}
+
+
+def _eodhd_to_ib_symbol(eodhd_ticker: str) -> str:
+    """Map an EODHD ticker (with optional venue suffix) to the IB symbol used
+    for parquet filenames and instrument records. Trend-signal tickers
+    (QQQ / TLT) have no suffix — return them unchanged.
+    """
+    return _TRADABLE_EODHD_TO_IB.get(eodhd_ticker, eodhd_ticker)
 
 
 # --- Default paths ----------------------------------------------------------
@@ -203,8 +253,10 @@ def _rows_to_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Refresh the 5 EODHD ticker parquets (TQQQ/TMF/IEF/QQQ/TLT) + "
-            "the SMA-eligibility signals parquet for triple_lev_sma_filter_dsl."
+            "Refresh the 5 EODHD ticker parquets (QQL3.LSE/IBTL.LSE/IBTM.LSE/"
+            "QQQ/TLT) + the SMA-eligibility signals parquet for "
+            "triple_lev_sma_filter_dsl (Phase 1 PRIIPs-compliant universe per "
+            "ADR-047)."
         ),
     )
     today = date.today()
@@ -298,42 +350,46 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"  range: {start.isoformat()} .. {end.isoformat()}")
-    print(f"  tickers: {', '.join(_ALL_TICKERS)}")
+    print(f"  tickers (EODHD): {', '.join(_ALL_EODHD_TICKERS)}")
+    print(f"  tradable IB symbols: {', '.join(_TRADABLE_IB)}")
     print(f"  SMA window: {args.sma_window}, enter_buffer: {args.enter_buffer}")
 
     # Fetch + parse all 5 tickers up-front so a single failure aborts before
-    # any partial writes.
+    # any partial writes. Frames are keyed by the IB symbol — the EODHD
+    # `.LSE` suffix is fetch-time only.
     frames: dict[str, pd.DataFrame] = {}
-    for ticker in _ALL_TICKERS:
-        _print_step(f"fetching {ticker}")
+    for eodhd_ticker in _ALL_EODHD_TICKERS:
+        ib_symbol = _eodhd_to_ib_symbol(eodhd_ticker)
+        label = eodhd_ticker if eodhd_ticker == ib_symbol else f"{eodhd_ticker} -> {ib_symbol}"
+        _print_step(f"fetching {label}")
         try:
-            rows = _fetch_eod(ticker=ticker, api_key=api_key, start=start, end=end)
+            rows = _fetch_eod(ticker=eodhd_ticker, api_key=api_key, start=start, end=end)
         except httpx.HTTPStatusError as exc:
             print(
-                f"\nFAILED on EODHD HTTP {exc.response.status_code} for {ticker!r}: "
+                f"\nFAILED on EODHD HTTP {exc.response.status_code} for {eodhd_ticker!r}: "
                 f"{exc.response.text[:200]}"
             )
             return 3
         except httpx.HTTPError as exc:
-            print(f"\nFAILED on EODHD network error for {ticker!r}: {exc}")
+            print(f"\nFAILED on EODHD network error for {eodhd_ticker!r}: {exc}")
             return 3
         if not rows:
             print(
-                f"\nFAILED: EODHD returned zero rows for {ticker!r}. "
+                f"\nFAILED: EODHD returned zero rows for {eodhd_ticker!r}. "
                 f"Check ticker / range / subscription coverage."
             )
             return 4
         try:
             df = _rows_to_frame(rows)
         except (ValueError, KeyError) as exc:
-            print(f"\nFAILED on response parse for {ticker!r}: {exc}")
+            print(f"\nFAILED on response parse for {eodhd_ticker!r}: {exc}")
             return 5
         if df.empty:
-            print(f"\nFAILED: all rows dropped during validation for {ticker!r}.")
+            print(f"\nFAILED: all rows dropped during validation for {eodhd_ticker!r}.")
             return 4
-        frames[ticker] = df
+        frames[ib_symbol] = df
         print(
-            f"    {ticker}: {len(df)} bar(s) "
+            f"    {ib_symbol}: {len(df)} bar(s) "
             f"({df['close_time_utc'].iloc[0].date()} .. {df['close_time_utc'].iloc[-1].date()})"
         )
 
@@ -342,12 +398,13 @@ def main(argv: list[str] | None = None) -> int:
     # samples (rare for QQQ + TLT to disagree on US calendar, but defensive).
     qqq_df = frames["QQQ"]
     tlt_df = frames["TLT"]
-    qqq_closes = pd.Series(
-        qqq_df["close"].values, index=qqq_df["close_time_utc"].values, name="QQQ"
-    )
-    tlt_closes = pd.Series(
-        tlt_df["close"].values, index=tlt_df["close_time_utc"].values, name="TLT"
-    )
+    # Use the close_time_utc Series (not .values) so the tz-aware UTC
+    # info is preserved on the index. .values strips tz to numpy
+    # datetime64[ns], which makes downstream intersections with
+    # tz-aware indices (e.g. canonical bar timestamps in the driver)
+    # silently empty.
+    qqq_closes = pd.Series(qqq_df["close"].values, index=qqq_df["close_time_utc"], name="QQQ")
+    tlt_closes = pd.Series(tlt_df["close"].values, index=tlt_df["close_time_utc"], name="TLT")
     common_idx = qqq_closes.index.intersection(tlt_closes.index)
     qqq_closes = qqq_closes.reindex(common_idx)
     tlt_closes = tlt_closes.reindex(common_idx)
@@ -374,27 +431,36 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nFAILED on signal computation: {exc}")
         return 5
 
-    tqqq_active = int((eligibility["TQQQ"] == 1.0).sum())
-    tmf_active = int((eligibility["TMF"] == 1.0).sum())
-    ief_active = int((eligibility["IEF"] == 1.0).sum())
+    # Rename eligibility columns from the notebook's original tradables
+    # (TQQQ / TMF / IEF) to the IB symbols of the PRIIPs-compliant Phase 1
+    # universe (QQL3 / IBTL / IBTM) per ADR-047. The hysteresis state-machine
+    # logic is unchanged — only the column labels move with the underlying
+    # tradables.
+    eligibility = eligibility.rename(columns=_ELIGIBILITY_COLUMN_RENAME)
+
+    qql3_active = int((eligibility["QQL3"] == 1.0).sum())
+    ibtl_active = int((eligibility["IBTL"] == 1.0).sum())
+    ibtm_active = int((eligibility["IBTM"] == 1.0).sum())
     print(
         f"    eligibility (active days / total {len(eligibility)}): "
-        f"TQQQ={tqqq_active}  TMF={tmf_active}  IEF={ief_active}"
+        f"QQL3={qql3_active}  IBTL={ibtl_active}  IBTM={ibtm_active}"
     )
 
     if args.dry_run:
         _print_header("dry-run -- nothing written")
         return 0
 
-    # Write the per-ticker daily parquets.
+    # Write the per-ticker daily parquets. Frames are keyed by IB symbol
+    # already (no `.LSE` suffix in filenames) so PaperMarketData's
+    # fixture-by-symbol lookup in the driver finds them directly.
     eodhd_dir = args.eodhd_dir if args.eodhd_dir is not None else _default_eodhd_dir()
     eodhd_dir.mkdir(parents=True, exist_ok=True)
-    for ticker, df in frames.items():
-        out_path = eodhd_dir / f"{ticker}_1d.parquet"
+    for ib_symbol, df in frames.items():
+        out_path = eodhd_dir / f"{ib_symbol}_1d.parquet"
         try:
             df.to_parquet(out_path, index=False)
         except (OSError, ValueError) as exc:
-            print(f"\nFAILED on parquet write for {ticker!r}: {exc}")
+            print(f"\nFAILED on parquet write for {ib_symbol!r}: {exc}")
             return 5
         size_kb = out_path.stat().st_size / 1024
         print(f"    wrote {out_path}  ({size_kb:.1f} KB)")
@@ -415,8 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from blive.adapters.paper.market_data import _read_fixture  # noqa: SLF001
 
-        for ticker in _ALL_TICKERS:
-            _read_fixture(eodhd_dir / f"{ticker}_1d.parquet")
+        for ib_symbol in (*_TRADABLE_IB, *_TREND_SIGNALS):
+            _read_fixture(eodhd_dir / f"{ib_symbol}_1d.parquet")
     except Exception as exc:  # noqa: BLE001 — defensive validation
         print(f"\nWARNING: per-ticker parquet(s) written but PaperMarketData rejected one: {exc}")
         return 5
