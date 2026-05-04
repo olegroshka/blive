@@ -111,6 +111,11 @@ def _make_mock_ib(
 
     # Real eventkit.Event for accountValueEvent so += / -= work realistically.
     m.accountValueEvent = eventkit.Event()
+    # Real eventkit.Event for errorEvent — the broker subscribes here at
+    # connect() to capture rejection reason text on the global error
+    # channel for paths that don't mirror it into trade.log (e.g. error
+    # 201 PRIIPs/KID; M2-IB.6.2 finding).
+    m.errorEvent = eventkit.Event()
 
     # Account values cache (read by IBBroker.connect to seed local cache).
     m.accountValues.return_value = list(initial_account_values or [])
@@ -918,6 +923,86 @@ async def test_submit_emits_rejected_on_status_inactive(
     event = await events_iter.__anext__()
     assert event.kind == OrderEventKind.REJECTED
     assert "insufficient buying power" in event.reason
+
+
+async def test_submit_emits_rejected_via_error_event_stash_when_log_empty(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """M2-IB.6.2 finding: IB error 201 PRIIPs/KID path delivers the rejection
+    text only on ``ib.errorEvent`` — ``trade.log`` carries empty-message
+    entries, ``whyHeld`` is empty, ``orderStatus.status`` is ``"Inactive"``.
+    The broker must consult its ``_error_by_order_id`` stash (populated by
+    the ``errorEvent`` subscription added in connect()) to recover the
+    formatted ``"ib:{code} {message}"`` reason; INV-14 v0.6 documents the
+    catalogued path for this rejection class.
+    """
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.LimitOrder("BUY", 1, 1.0))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+    await broker.submit(_build_order())
+    await events_iter.__anext__()  # SUBMITTED
+
+    # Production wire ordering (M2-IB.6.2 finding 2026-05-04): ib_async
+    # dispatches the per-trade statusEvent BEFORE the global errorEvent for
+    # IB-error rejections, so the broker schedules a deferred async helper
+    # to read the stash on a subsequent loop tick. Tests must mirror this
+    # ordering — fire statusEvent first, then errorEvent, then drive the
+    # loop forward — otherwise the test passes trivially and doesn't catch
+    # the race the helper is designed to resolve.
+    empty_log_entry = MagicMock()
+    empty_log_entry.errorCode = 0
+    empty_log_entry.message = ""
+    fake_trade.log = [empty_log_entry]
+    fake_trade.orderStatus.status = "Inactive"
+    fake_trade.orderStatus.whyHeld = ""
+    fake_trade.statusEvent.emit(fake_trade)
+
+    priips_message = (
+        "Order rejected - reason:No Trading Permission, Customer Ineligible; "
+        "Ineligibility reasons:This product does not have a KID in English "
+        "or in a language approved for your country."
+    )
+    mock_ib.errorEvent.emit(fake_trade.order.orderId, 201, priips_message, fake_trade.contract)
+
+    # Drive the loop forward to let the deferred helper run.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    event = await events_iter.__anext__()
+    assert event.kind == OrderEventKind.REJECTED
+    assert event.reason is not None
+    assert "ib:201" in event.reason
+    assert "KID" in event.reason
+
+    # The stash entry should be popped on terminal emission so memory
+    # doesn't grow across long sessions.
+    assert fake_trade.order.orderId not in broker._error_by_order_id  # noqa: SLF001
+
+
+async def test_error_event_ignores_connection_level_reqid(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """ib.errorEvent fires with reqId == -1 for connection-level events
+    (data-farm status, market-data subscription warnings). The broker
+    must ignore those — they don't correspond to an order and would
+    otherwise pollute the orderId-keyed stash."""
+    mock_ib = _make_mock_ib()
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+
+    mock_ib.errorEvent.emit(-1, 2104, "Market data farm connection is OK:eufarm", None)
+    mock_ib.errorEvent.emit(0, 1100, "Connectivity between IB and TWS lost.", None)
+    await asyncio.sleep(0)
+
+    assert broker._error_by_order_id == {}  # noqa: SLF001
 
 
 async def test_submit_emits_rejected_when_cancelled_with_error_code_in_log(

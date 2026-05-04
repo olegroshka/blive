@@ -224,6 +224,19 @@ class IBBroker:
         # to the originating ``client_order_id``.
         self._trades_by_client_id: dict[ClientOrderId, ib_async.Trade] = {}
         self._order_tracking: dict[ClientOrderId, _OrderTrackingState] = {}
+        # Latest IB error keyed by ``reqId`` (which equals ``orderId`` for
+        # order-related errors). Some IB rejection paths — observed at
+        # M2-IB.6.2 with error 201 PRIIPs/KID — deliver the error text
+        # *only* on ``ib.errorEvent`` (not into ``trade.log``), so the
+        # per-trade ``statusEvent`` handler has no message to surface.
+        # The stash bridges the global error channel to the Inactive-status
+        # rejection path (see :meth:`_on_order_status`); entries are popped
+        # on terminal-event emission to bound memory.
+        self._error_by_order_id: dict[int, tuple[int, str]] = {}
+        # Cached handler reference for ``ib.errorEvent`` subscription —
+        # symmetric with :attr:`_account_value_handler` so disconnect can
+        # detach via ``-=``.
+        self._ib_error_handler = self._on_ib_error
 
     @property
     def is_connected(self) -> bool:
@@ -262,6 +275,10 @@ class IBBroker:
             self._on_account_value(av)
         # Subscribe for future updates.
         ib.accountValueEvent += self._account_value_handler
+        # Subscribe to the global error channel so we can recover error
+        # text for rejection paths that don't mirror it into ``trade.log``
+        # (M2-IB.6.2 finding — error 201 PRIIPs/KID is one such path).
+        ib.errorEvent += self._ib_error_handler
         self._connected = True
         # Start the 30s diff-suppress AccountUpdate emission timer per
         # ADR-033 §"Decision" item 2.
@@ -312,6 +329,10 @@ class IBBroker:
             ib.accountValueEvent -= self._account_value_handler
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
             log.warning("Detaching ib.accountValueEvent handler raised; suppressing: %s", exc)
+        try:
+            ib.errorEvent -= self._ib_error_handler
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("Detaching ib.errorEvent handler raised; suppressing: %s", exc)
         # Note: no explicit reqAccountUpdates(False, ...) — ib_async's TWS
         # API wrapping doesn't expose an unsubscribe path; the subscription
         # is torn down implicitly when the underlying socket disconnects.
@@ -319,6 +340,7 @@ class IBBroker:
         self._connected = False
         self._account_values.clear()
         self._last_emitted_snapshot = None
+        self._error_by_order_id.clear()
         await self._events.put(
             ConnectionStatus(
                 connected=False,
@@ -626,6 +648,7 @@ class IBBroker:
             else:
                 reason = _cancel_reason_from_status(status, trade)
                 kind = OrderEventKind.CANCELED
+            self._error_by_order_id.pop(int(trade.order.orderId), None)
             asyncio.create_task(
                 self._events.put(
                     OrderEvent(
@@ -639,18 +662,13 @@ class IBBroker:
             )
         elif status == _REJECTED_STATUS:
             tracking.terminal_emitted = True
-            reason = _rejected_reason_from_trade(trade)
-            asyncio.create_task(
-                self._events.put(
-                    OrderEvent(
-                        client_order_id=client_order_id,
-                        venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
-                        kind=OrderEventKind.REJECTED,
-                        reason=reason,
-                        time_utc=self._clock.now(),
-                    )
-                )
-            )
+            # Deferred emission via :meth:`_emit_rejected_via_inactive` —
+            # ib_async dispatches ``statusEvent`` BEFORE ``errorEvent`` for
+            # IB-error rejections (M2-IB.6.2 wire-finding 2026-05-04), so a
+            # synchronous reason-lookup here would read the per-orderId
+            # error stash before it has been populated. Yielding once via
+            # the async helper lets the errorEvent handler run first.
+            asyncio.create_task(self._emit_rejected_via_inactive(client_order_id, trade))
 
     def _on_order_fill(
         self,
@@ -732,6 +750,7 @@ class IBBroker:
         kind = OrderEventKind.FILLED if terminal else OrderEventKind.PARTIAL_FILL
         if terminal:
             tracking.terminal_emitted = True
+            self._error_by_order_id.pop(int(trade.order.orderId), None)
 
         asyncio.create_task(
             self._events.put(
@@ -847,6 +866,115 @@ class IBBroker:
         if account_value.account and account_value.account != self._client.credentials.account_id:
             return
         self._account_values[(currency, tag)] = account_value.value
+
+    def _on_ib_error(
+        self,
+        reqId: int,
+        errorCode: int,
+        errorString: str,
+        contract: Any = None,
+    ) -> None:
+        """Stash the latest IB error keyed by ``reqId``.
+
+        ib_async dispatches ``ib.errorEvent`` with ``(reqId, errorCode,
+        errorString, contract)`` for every error push from IB. For
+        order-related errors, ``reqId`` equals the order's ``orderId``,
+        so we can correlate back to the rejected trade in
+        :meth:`_on_order_status` when the per-trade ``trade.log`` doesn't
+        carry the message (observed at M2-IB.6.2 with error 201
+        PRIIPs/KID — IB delivers the rejection text on this channel only,
+        the trade transitions to ``status="Inactive"`` with empty
+        ``log[-1].message`` and empty ``whyHeld``).
+
+        Connection-level events use ``reqId == -1`` (or other negative
+        sentinels); we skip those — the connection lifecycle is handled
+        elsewhere and they don't correspond to specific orders.
+
+        ``contract`` is unused by the stash but kept in the signature so
+        ib_async's eventkit dispatch matches the published handler shape.
+        """
+        if reqId <= 0:
+            return
+        self._error_by_order_id[int(reqId)] = (int(errorCode), errorString or "")
+
+    async def _emit_rejected_via_inactive(
+        self,
+        client_order_id: ClientOrderId,
+        trade: ib_async.Trade,
+    ) -> None:
+        """Deferred REJECTED emission for the ``status="Inactive"`` path.
+
+        ib_async dispatches the per-trade ``statusEvent`` (which delivers
+        ``status="Inactive"``) **before** the global ``errorEvent`` (which
+        delivers the error code + message) for IB-error rejections —
+        observed at M2-IB.6.2 against IB Paper with error 201 PRIIPs/KID.
+        A synchronous reason-lookup at the moment the status handler fires
+        therefore reads an empty :attr:`_error_by_order_id` stash and falls
+        through to the generic ``"rejected"`` placeholder, losing the
+        diagnostic detail INV-14 v0.6 documents.
+
+        The fix is to defer the lookup by yielding the event loop a few
+        times before consulting the stash. ib_async's eventkit dispatches
+        Events synchronously inside a single wire-message tick, so by the
+        time control returns to us after ``await asyncio.sleep(0)`` the
+        ``errorEvent`` handler has run and populated the stash. Multiple
+        yields are belt-and-braces in case ib_async splits dispatch across
+        loop ticks under load — fast (microseconds) and tolerant.
+
+        Reason-lookup chain:
+
+        1. Trade-state extraction (``trade.log[-1].message`` / ``whyHeld``)
+           per :func:`_rejected_reason_from_trade`.
+        2. ``_error_by_order_id`` stash keyed by ``trade.order.orderId``,
+           formatted as ``"ib:{code} {message}"`` per INV-14 v0.6.
+        3. Generic ``"rejected"`` fallback + warning log so the breadcrumb
+           is findable in retrospective analysis when neither channel
+           carried text (would indicate an ib_async dispatch regression).
+        """
+        # Yield enough times for any pending errorEvent dispatch to complete.
+        # Three iterations covers the common case (one tick) plus a margin.
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        rejected_reason: str | None = _rejected_reason_from_trade(trade)
+        if rejected_reason is None:
+            rejected_reason = self._reason_from_error_stash(trade.order.orderId)
+        if rejected_reason is None:
+            log.warning(
+                "IBBroker: REJECTED via Inactive with no recoverable reason "
+                "(orderId=%s, client_order_id=%s); falling back to 'rejected'. "
+                "Inspect ib_async errorEvent dispatch if this surfaces in "
+                "production.",
+                trade.order.orderId,
+                client_order_id,
+            )
+            rejected_reason = "rejected"
+        self._error_by_order_id.pop(int(trade.order.orderId), None)
+        await self._events.put(
+            OrderEvent(
+                client_order_id=client_order_id,
+                venue_order_id=str(trade.order.orderId) if trade.order.orderId else None,
+                kind=OrderEventKind.REJECTED,
+                reason=rejected_reason,
+                time_utc=self._clock.now(),
+            )
+        )
+
+    def _reason_from_error_stash(self, order_id: int) -> str | None:
+        """Return the formatted rejection reason for ``order_id`` from the
+        ``errorEvent`` stash, or ``None`` if no error is on file.
+
+        Format mirrors :func:`_rejected_reason_from_log_entry` for
+        consistency with INV-14 v0.5+: ``"ib:{errorCode} {message}"``.
+        Empty message degrades to ``"ib:{errorCode}"``.
+        """
+        entry = self._error_by_order_id.get(int(order_id))
+        if entry is None:
+            return None
+        code, message = entry
+        if message:
+            return f"ib:{code} {message}"
+        return f"ib:{code}"
 
     # --- Internals: parsers -------------------------------------------------
 
@@ -1262,14 +1390,19 @@ def _rejected_reason_from_log_entry(entry: Any) -> str:
     return f"ib:{error_code}"
 
 
-def _rejected_reason_from_trade(trade: ib_async.Trade) -> str:
-    """Extract the reject reason from an Inactive trade.
+def _rejected_reason_from_trade(trade: ib_async.Trade) -> str | None:
+    """Extract the reject reason from an Inactive trade, or ``None`` if
+    nothing useful is on the trade.
 
-    IB pushes the reject reason via the ``log`` attribute (TradeLogEntry
-    list) and via ``orderStatus.whyHeld``. We prefer the most recent log
-    entry's message, falling back to whyHeld, falling back to a generic
-    message. The result is the [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
-    reason string for the REJECTED event.
+    IB *sometimes* pushes the reject reason via the ``log`` attribute
+    (TradeLogEntry list) or ``orderStatus.whyHeld`` — but for some
+    rejection paths (observed at M2-IB.6.2 with error 201 PRIIPs/KID)
+    the reason text lives only on the global ``ib.errorEvent`` channel
+    and never reaches ``trade.log`` / ``whyHeld``. Returning ``None``
+    signals the caller to consult the broker's
+    ``_error_by_order_id`` stash before falling back to a generic
+    "rejected" placeholder. The [INV-13 §5](../../../../docs/inv/order_state_transitions.md#5-reason-taxonomy-for-cancel-and-reject)
+    reason string is built by the caller after that lookup.
     """
     if trade.log:
         last = trade.log[-1]
@@ -1279,7 +1412,7 @@ def _rejected_reason_from_trade(trade: ib_async.Trade) -> str:
     why_held = getattr(trade.orderStatus, "whyHeld", "")
     if why_held:
         return why_held
-    return "rejected"
+    return None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
