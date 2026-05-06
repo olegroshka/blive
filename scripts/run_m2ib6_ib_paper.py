@@ -437,6 +437,19 @@ async def _run(args: argparse.Namespace) -> int:
     live = _build_live_strategy(strategy_id=args.strategy_id, nav_slice=args.nav_slice)
     order_type = OrderType.MKT if args.order_type == "MKT" else OrderType.LMT
 
+    # QQL3 (3× Nasdaq leveraged ETP) hits IB's regulatory disruptive-orders
+    # price-cap on raw MKT (warning 2161; INV-14 v0.7), so we route it via
+    # IBALGO Adaptive (`OrderType.ADAPTIVE_MKT`). IBTM / IBTL are 1× UCITS
+    # Treasury ETFs and don't trip the cap — they stay on the global
+    # ``order_type`` (MKT default). Per-symbol override only applies when
+    # the global order_type is MKT or ADAPTIVE_MKT; for LMT runs (operator
+    # explicit) we don't override since the operator-set limit price
+    # already constrains routing.
+    if order_type == OrderType.MKT:
+        order_type_by_symbol = {_QQL3.symbol: OrderType.ADAPTIVE_MKT}
+    else:
+        order_type_by_symbol = None
+
     _print_header("Running multi-instrument pipeline")
     try:
         result = await run_ib_multi_pipeline(
@@ -448,6 +461,7 @@ async def _run(args: argparse.Namespace) -> int:
             starting_cash=args.starting_cash,
             base_currency="USD",
             order_type=order_type,
+            order_type_by_symbol=order_type_by_symbol,
             limit_price_offset_bps=args.limit_offset_bps,
             event_wait_seconds=args.event_wait_seconds,
         )

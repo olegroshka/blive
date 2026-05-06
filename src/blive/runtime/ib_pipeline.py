@@ -46,6 +46,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Mapping
 from uuid import uuid4
 
 import pandas as pd
@@ -338,6 +339,7 @@ async def run_ib_multi_pipeline(
     starting_cash: Decimal = Decimal("1000000"),
     base_currency: str = "USD",
     order_type: OrderType = OrderType.MKT,
+    order_type_by_symbol: Mapping[str, OrderType] | None = None,
     limit_price_offset_bps: Decimal = Decimal("50"),
     event_wait_seconds: float = 10.0,
     kill_switch: KillSwitch | None = None,
@@ -481,10 +483,21 @@ async def run_ib_multi_pipeline(
             if approved is None:
                 continue
 
+            # Per-symbol order_type override per [INV-14 v0.7](../../../docs/inv/ib_error_codes.md)
+            # warning 2161: leveraged-leg orders (e.g. QQL3 on LSEETF) hit
+            # IB's regulatory disruptive-orders price-cap on raw MKT, so
+            # the operator can opt them in to ADAPTIVE_MKT (IBALGO Adaptive)
+            # via ``order_type_by_symbol``. Symbols absent from the map
+            # fall through to the global ``order_type`` argument.
+            effective_order_type = (
+                order_type_by_symbol.get(approved.instrument.symbol, order_type)
+                if order_type_by_symbol is not None
+                else order_type
+            )
             order_for_ib = _ib_order_from_desired(
                 desired=approved,
                 bar=bars_by_symbol[approved.instrument.symbol],
-                order_type=order_type,
+                order_type=effective_order_type,
                 limit_price_offset_bps=limit_price_offset_bps,
             )
 
@@ -589,14 +602,14 @@ def _ib_order_from_desired(
     path on the engine's bar-end cancel.
     """
     base = desired
-    if order_type == OrderType.MKT:
+    if order_type in (OrderType.MKT, OrderType.ADAPTIVE_MKT):
         return Order(
             client_order_id=ClientOrderId(uuid4()),
             strategy_id=base.strategy_id,
             instrument=base.instrument,
             side=base.side,
             quantity=base.quantity,
-            order_type=OrderType.MKT,
+            order_type=order_type,
             time_in_force=base.time_in_force,
             limit_price=None,
             stop_price=None,
@@ -624,7 +637,9 @@ def _ib_order_from_desired(
             tags={**base.tags, "pipeline": "m2-ib.5"},
             created_at=base.created_at,
         )
-    raise ValueError(f"run_ib_pipeline supports MKT or LMT order_type only; got {order_type!r}")
+    raise ValueError(
+        f"run_ib_pipeline supports MKT / ADAPTIVE_MKT / LMT order_type only; got {order_type!r}"
+    )
 
 
 async def _drain_startup_events(broker: IBBroker) -> None:

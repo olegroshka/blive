@@ -717,6 +717,48 @@ async def test_submit_market_order_emits_submitted_immediately(
     assert place_args.args[1].orderRef == str(order.client_order_id)
 
 
+async def test_submit_adaptive_mkt_order_routes_via_ibalgo(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """OrderType.ADAPTIVE_MKT (M2-IB.6.2c) builds an ib_async.MarketOrder
+    with ``algoStrategy="Adaptive"`` and ``algoParams=[("adaptivePriority",
+    "Normal")]`` set. IBALGO Adaptive bypasses IB's regulatory
+    disruptive-orders price-cap (warning 2161; INV-14 v0.7) which raw MKT
+    on volatile / leveraged products like QQL3 on LSEETF triggers
+    structurally — observed in production at M2-IB.6.2b 2026-05-06 where
+    raw MKT bound to ``mktCapPrice=38.9`` for the full 60-second event
+    wait without filling. Adaptive routes via IB's smart agency layer
+    instead, treated as not-a-raw-MKT for the disruption check.
+    """
+    mock_ib = _make_mock_ib()
+    fake_trade = _make_mock_trade(order=ib_async.MarketOrder("BUY", 1))
+    mock_ib.placeOrder.return_value = fake_trade
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+    events_iter = broker.events()
+    await events_iter.__anext__()  # ConnectionStatus
+
+    order = _build_order(order_type=OrderType.ADAPTIVE_MKT, limit_price=None)
+    cid = await broker.submit(order)
+
+    assert cid == order.client_order_id
+    place_args = mock_ib.placeOrder.call_args
+    placed_ib_order = place_args.args[1]
+    # Adaptive metadata must be present on the wire-going order.
+    assert placed_ib_order.algoStrategy == "Adaptive"
+    assert len(placed_ib_order.algoParams) == 1
+    tag_value = placed_ib_order.algoParams[0]
+    assert tag_value.tag == "adaptivePriority"
+    assert tag_value.value == "Normal"
+    # Same SUBMITTED emission shape as raw MKT — ADAPTIVE_MKT is a
+    # routing variant, not an FSM variant.
+    event = await events_iter.__anext__()
+    assert isinstance(event, OrderEvent)
+    assert event.kind == OrderEventKind.SUBMITTED
+
+
 async def test_submit_lmt_order_emits_accepted_on_status_submitted(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,

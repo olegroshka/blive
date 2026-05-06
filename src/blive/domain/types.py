@@ -43,6 +43,18 @@ class OrderType(StrEnum):
     LOC = "LOC"
     STP = "STP"
     STP_LMT = "STP_LMT"
+    # IB-specific algorithmic Market order variant routed via IBALGO Adaptive
+    # ("smart agency" routing). Bypasses IB's regulatory disruptive-orders
+    # price-cap (warning 2161) for volatile / leveraged products on LSEETF
+    # and other venues where raw MKT gets auto-converted to a capped LMT —
+    # observed at M2-IB.6.2b (2026-05-06) on QQL3, where the raw-MKT cap
+    # bound structurally even at a 60-second event-wait. Strategies opt in
+    # per-instrument; not a default. Adapter-side (IBBroker) sets
+    # ``algoStrategy="Adaptive"`` + ``algoParams=[("adaptivePriority","Normal")]``
+    # on the underlying ib_async.MarketOrder. Other adapters that do not
+    # support algorithmic order routing (paper, mock, or future brokers
+    # without an equivalent) raise on submit per the registry contract.
+    ADAPTIVE_MKT = "ADAPTIVE_MKT"
 
 
 class TimeInForce(StrEnum):

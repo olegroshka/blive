@@ -1281,7 +1281,10 @@ def _parse_time_in_force(tif_str: str) -> TimeInForce:
 def _blive_to_ib_order(order: Order) -> ib_async.Order:
     """Map a broker-neutral :class:`Order` to ``ib_async.Order``.
 
-    M2-IB.4a supports ``MKT``, ``LMT``, ``STP``, ``STP_LMT``. ``MOC`` /
+    Supports ``MKT``, ``LMT``, ``STP``, ``STP_LMT`` (M2-IB.4a) and
+    ``ADAPTIVE_MKT`` (M2-IB.6.2c — IBALGO Adaptive variant of MKT that
+    bypasses IB's regulatory disruptive-orders price-cap on volatile /
+    leveraged products; see warning 2161 in INV-14 v0.7). ``MOC`` /
     ``LOC`` / ``OPG`` are valid blive types per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
     but raise here pending v1.1 — they require additional IB plumbing
     (``goodAfterTime``, ``tif="OPG"``, etc.).
@@ -1293,6 +1296,21 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
     ib_order: ib_async.Order
     if order.order_type == OrderType.MKT:
         ib_order = ib_async.MarketOrder(action=action, totalQuantity=qty)
+    elif order.order_type == OrderType.ADAPTIVE_MKT:
+        # IBALGO Adaptive: a smart agency order that IB does NOT apply the
+        # disruptive-orders price-cap to (warning 2161 path), because the
+        # algorithm itself manages execution price + timing within IB's
+        # regulatory envelope. Validated at M2-IB.6.2c against QQL3 on
+        # LSEETF where raw MKT was structurally cap-bound at the bid even
+        # with a 60-second event-wait. ``adaptivePriority="Normal"`` is
+        # IB's recommended default — alternative values are "Patient"
+        # (slower but lower impact) and "Urgent" (faster but more market
+        # impact). ``Normal`` is appropriate for the M2-IB.6 daily-rebalance
+        # cadence; Phase-2 strategies with intra-day cadence can override
+        # via a future Order.algo_priority field if needed.
+        ib_order = ib_async.MarketOrder(action=action, totalQuantity=qty)
+        ib_order.algoStrategy = "Adaptive"
+        ib_order.algoParams = [ib_async.TagValue("adaptivePriority", "Normal")]
     elif order.order_type == OrderType.LMT:
         if order.limit_price is None:
             raise ValueError(f"LMT order {order.client_order_id} requires limit_price")
@@ -1324,8 +1342,8 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
     else:
         raise NotImplementedError(
             f"IBBroker.submit does not support order_type={order.order_type.value} "
-            f"at M2-IB.4a. Supported: MKT, LMT, STP, STP_LMT. MOC/LOC/OPG "
-            f"land at v1.1 if a strategy needs them."
+            f"at M2-IB.6.2c. Supported: MKT, ADAPTIVE_MKT, LMT, STP, STP_LMT. "
+            f"MOC/LOC/OPG land at v1.1 if a strategy needs them."
         )
 
     ib_order.tif = tif

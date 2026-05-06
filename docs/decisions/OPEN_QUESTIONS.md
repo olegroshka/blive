@@ -3,8 +3,8 @@ id: KB-11
 title: Open Questions
 status: DRAFT
 owner: shared (Oleg primary, Claude assist)
-last_reviewed: 2026-04-27
-version: 0.3
+last_reviewed: 2026-05-06
+version: 0.4
 sources: []
 depends_on: []
 referenced_by:
@@ -316,6 +316,21 @@ These sub-questions surfaced when the parent decisions (OQ-013, 014, 015, 018) w
 - **Resolution criteria:** at G2 review, decide whether to (a) amend ADR-010 prose to acknowledge `SingleAssetRunner` and any future archetype-specific interpreters, (b) advocate Option 3 with btest, or (c) keep ADR-010 unchanged and treat the dispatch as an undocumented but stable pattern. Plus: confirm `LongShortPortfolio` archetype works under the same M1 pipeline shape when Phase 3 (`lagging_indecies`) lands at M7.
 - **Cross-references:** [ADR-010](DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import); [KB-1 §6, §7](../kb/btest_dsl_inventory.md); [`runners/single_asset.py`](`btest/src/quantdsl_backtest/runners/single_asset.py`); M0 retro recommendation 1; M1 work this session.
 
+### OQ-031 — Phase 1 deployment under PMA-bound retail account
+
+- **status:** OPEN
+- **opened:** 2026-05-06 · **target_resolution:** before Phase 1 live cutover (G3-IB → G4 transition)
+- **depends_on:** [ADR-047](DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043); [ADR-049 PROPOSED](DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding); [INV-14 v0.7](../inv/ib_error_codes.md)
+- **Background:** The 2026-05-06 LSE-RTH validation runs of `scripts/run_m2ib6_ib_paper.py` empirically confirmed that **IB warning 2161 (Price Management Algo / regulatory disruptive-orders cap) binds structurally** on QQL3 (3× Nasdaq leveraged ETP on LSEETF) for the operator's UK retail IB Paper account. The cap pegs the effective limit to IB's live bid/ask reference; in rising markets, BUY orders capped at the bid don't fill. Tested across raw MKT (10s + 60s waits), `OrderType.ADAPTIVE_MKT` (IBALGO Adaptive — IB's recommended workaround in the warning text), and LMT @ $50 (well above IB ref ~$39 but within allowed-range envelope) — all subject to the cap; 0 QQL3 fills across 16 placeOrders. The `priceManagementOff` order flag is institutional-only. IBTM (1× UCITS Treasury ETF) is unaffected — fills land cleanly. Implication: Phase 1 deployment of A3 has a **regime-dependent fill profile** on its leveraged equity leg — fills happen only when the market mean-reverts to the cap level. In extended uptrends, the strategy spends time long the equity leg without acquiring full position, then is forced to acquire on regime-flips into safe-haven (when ask drops to bid). This is **opposite to the intended trend-following profile**.
+- **Options:**
+  1. **Accept the constraint as a real-world Phase 1 deployment characteristic.** Document the regime-dependent fill profile in the strategy's risk-and-execution-profile note. M7 parity envelope absorbs the divergence from the article's backtest fill-rate assumptions. Operator monitors fill-rate empirically over the first ~5 trading days of live deployment; if the fill-rate is unacceptable (TBD threshold), revisit. **No code change.**
+  2. **Pursue MiFID II Professional Client classification** to enable the `priceManagementOff` order flag (institutional-only opt-out from PMA). Per [ADR-047 §"Alternatives Considered" item 2](DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043), this requires meeting wealth / experience / transaction-frequency thresholds. Operator declined at M2-IB.6.1; revisit if Option 1's fill-rate is unacceptable.
+  3. **Substitute the leveraged equity leg with a non-leveraged analogue** (e.g. directly hold QQQ via UK-listed UCITS or remove the 3× leverage entirely). Materially changes the strategy's risk profile (1×/1× vs intended 3×/1× post-ADR-047 vs original 3×/3× from the notebook); equivalent to a different strategy. Captured here for completeness; would amend ADR-043 + ADR-047.
+  4. **Restructure as a passive-limit-only strategy** that explicitly accepts the PMA cap as the execution model — submits at the cap, accepts the regime-dependent fill rate as the strategy's intended behaviour rather than a constraint. Closer to a mean-reversion strategy than the trend-following A3; would need a fresh ADR + parity envelope.
+- **Proposed default (working answer):** Option 1 for the first ~5 trading days of paper-mode validation; revisit the choice based on empirical fill-rate data before live cutover. The architectural surface (M2-IB.6) closes on Option 1 — the cap is a real wire finding that does not block FSM / pipeline validation; the operational decision is downstream.
+- **Resolution criteria:** before live cutover (G3-IB → G4 gate). Operator decides between Options 1–4 based on (a) the M2-IB.6 retro's fill-rate evidence, (b) the strategy's empirical regime-bias when the parity envelope re-derives at M7, (c) the operator's own risk tolerance for PMA-bound execution.
+- **Cross-references:** [ADR-047](DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043); [ADR-049 PROPOSED](DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding); [INV-14 v0.7](../inv/ib_error_codes.md); M2-IB.6.2b/c wire-finding (2026-05-06).
+
 ---
 
 ## Section C — Index by status
@@ -350,6 +365,7 @@ OQ-017 — Triple Leveraged ETF instrument set is `{TQQQ, TMF, IEF}`.
 | OQ-023 | ForgeFolio integration | post-M8 |
 | OQ-028 | Agentic memory framework / tooling for L0+L1 | before L0+L1 implementation |
 | OQ-029 | Timing of L0+L1 implementation | at or before G4 gate |
+| OQ-031 | Phase 1 deployment under PMA-bound retail account | before Phase 1 live cutover (G3-IB → G4) |
 
 ### IN_DISCUSSION (have a working default in REQUIREMENTS §16; ADRs not yet written)
 
@@ -373,3 +389,4 @@ OQ-001..OQ-011, OQ-020.
 - **v0.1.4 (2026-04-26)** — ADR-026 (agentic-execution layer) added; OQ-028 (memory framework choice) and OQ-029 (implementation timing) raised. New Section B'' for layer-related questions.
 - **v0.2 (2026-04-27 / M1 close)** — OQ-030 raised at M1 close (btest interpreter dispatch for non-LongShort archetypes); IN_DISCUSSION pending G2 review.
 - **v0.3 (2026-04-27 / M2-IG.1 substrate ACCEPTED batch)** — OQ-030 status flipped IN_DISCUSSION → RESOLVED-BY-ADR-030 alongside the eight-ADR ACCEPTED flip. Section C tables updated. Now: 13 RESOLVED-BY-ADR (013–016, 018, 019, 021, 022, 024–027, 030); 1 RESOLVED-by-finding (017); 4 OPEN (012, 023, 028, 029); 11 IN_DISCUSSION (001–011, 020).
+- **v0.4 (2026-05-06 / M2-IB.6.2c)** — OQ-031 raised: Phase 1 deployment under PMA-bound retail account. The M2-IB.6.2b/c LSE-RTH validation runs empirically confirmed that IB warning 2161 (Price Management Algo / regulatory disruptive-orders cap) binds structurally on QQL3 (3× Nasdaq leveraged ETP on LSEETF) for UK retail accounts, regardless of order type (raw MKT, OrderType.ADAPTIVE_MKT, LMT-with-aggressive-offset all subject). 0 QQL3 fills across 16 placeOrders today; IBTM (1× UCITS Treasury ETF) is unaffected. Implication: A3's effective execution profile on the leveraged equity leg is regime-dependent (fills only on flat/down moves). Four resolution options: (1) accept the constraint, monitor empirically; (2) pursue Pro Client classification for `priceManagementOff` opt-out; (3) substitute non-leveraged equity leg; (4) restructure as passive-limit-only. Working default: Option 1 for the first ~5 trading days, revisit pre-cutover. OPEN section grows to 5 (012, 023, 028, 029, **031**).
