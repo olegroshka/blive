@@ -4,17 +4,20 @@ title: Task Registry — Phase 1 Plan
 status: DRAFT
 owner: Oleg primary, Claude assist
 last_reviewed: 2026-05-06
-version: 0.5
+version: 0.6
 sources:
   - REQUIREMENTS.md §14
   - KB-5 §7
   - ADR-013
   - PHASE_1_READINESS.md
+  - PHASE_2_READINESS.md
+  - RETRO-M2-IB
 depends_on:
   - REQUIREMENTS
   - KB-5
   - PHASE_1_READINESS
-  - KB-11 (proposed OQ-024..OQ-027 resolutions)
+  - PHASE_2_READINESS
+  - KB-11 (OQ-031 OPEN, OQ-024..OQ-027 RESOLVED-BY-ADR)
 referenced_by:
   - CONTEXT_INVENTORY §1 layer 4
 ---
@@ -272,47 +275,102 @@ The IG-specific code (modules under `blive/adapters/ig/`, KB-16, KB-17, DD-8, AD
 
 ---
 
-### M3 — IB Adapter (Write Side) & First Live (Paper) Strategy
+### M3 — Phase 1 Deployment Decision — DRAFT
 
-**Goal:** `tkan_v4_momentum_timing` 1× submits real orders to IB Paper through blive; FSM transitions are driven by IB events; first live (paper) strategy run on a regulated venue.
+**Status:** DRAFT — entered post-`M2-IB.6-close` (2026-05-06). Plan-drafted in the [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md) third session of the M2 → Phase 2 transition. **Re-scoped from the legacy "M3 — IB Adapter (Write Side)" framing**, which was consolidated into M2-IB.4 / M2-IB.6 already.
+
+**Goal:** Resolve [OQ-031](./docs/decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on observed paper-mode fill-rate evidence rather than principle, fix the EODHD-vs-IB unit-of-quote reconciliation that contaminates the empirical signal, exercise the mixed-currency P&L surface live, extend [INV-14](./docs/inv/ib_error_codes.md) + author KB-7 / INV-8 / INV-9 / KB-15 stub-DRAFTs from observed M3 behaviour, and flip KB-2 / KB-3 to STABLE. Exit posture is Phase 2 entry: a deployment-mode chosen for live cutover, a parity envelope re-derivable from the substituted universe, and Phase-2-prerequisite stub artefacts in place at the level the §8.3.2 G4 gate requires.
+
+**Five plan-drafting calls (2026-05-06)** — recorded inline so the plan's *why* survives:
+
+1. **OQ-031 sequencing → inform-then-resolve.** M3 runs the empirical window first; OQ-031 resolves at M3.3 based on observed fill-rate, *then* becomes the precondition for live cutover at G4. Falsifiable-from-entry per [RETRO-M2-IB §"Recommendations for the discipline"](./docs/retros/M2-IB_retrospective.md) #2.
+2. **Empirical fill-rate window → 10 trading days, calendar-bound.** RETRO upper bound; covers ≥ 1 likely regime change; M3 has a definite end-date. Quality check: regime-flat windows annotate the OQ-031 decision rather than wait unbounded.
+3. **EODHD-vs-IB unit-of-quote → pull forward to M3 (narrow scope).** The 10× sizing bug confounds M3.2's empirical data; OQ-031's decision rests on cap-binding behaviour which depends on order size relative to depth. Narrow scope: unit-of-quote / reverse-split reconciliation only — full M7 parity diagnostic stays in M7.
+4. **Strategy-slot scope → A3-only through M3.** M3 is reframed as Phase 1 deployment-decision milestone, not strategy-comparison. A1 / A1a stay as Phase 2 / M4 entrants per Sketched M4+.
+5. **Phase 2 substrate prerequisites → M3 ships stub-DRAFTs only of what M3 itself produces.** KB-7 (chaos-drill catalogue from M3.5 only), INV-8 (M3.2 fill-rate / cap-binding / regime-flip metrics only), INV-9 (M3.2 kill-switch alerts only), KB-15 (M3.1 unit-of-quote section only). DD-4 stays MISSING (M4 territory). RC-01..RC-07 + RC-11 implementation stays M4. RC-10 (price sanity) lands in M3.1 as the code-side capture of #3.
+
+**Sub-milestones:**
+
+- **M3.1 — EODHD-vs-IB unit-of-quote reconciliation.** Investigate whether QQL3's ~10× EODHD-vs-IB price discrepancy ([RETRO-M2-IB](./docs/retros/M2-IB_retrospective.md) §"Surprises" #7) is a recent reverse-split, an EODHD unit-of-quote convention, or both. Narrow-scope sizing fix: subscribe to IB live market data for sizing reference (operator-decision: cost vs convenience), or document EODHD's convention so the strategy converts. Implement RC-10 (price sanity) as the code-side capture; would have caught this at sizing before IB error 110 surfaced. Substrate: KB-15 `parity_methodology` MISSING → DRAFT v0.1 (unit-of-quote / reverse-split section only); [INV-4 v0.1](./docs/inv/risk_checks.md) → v0.2 (RC-10 row promoted to implemented); [INV-14](./docs/inv/ib_error_codes.md) grows if new error codes surface during the investigation.
+
+- **M3.2 — Empirical paper-mode window (10 trading days, calendar-bound).** Run `scripts/run_m2ib6_ib_paper.py` (or its successor with M3.1's reconciled sizing) against the QQL3 / IBTL / IBTM universe across 10 LSE-RTH trading days, with EODHD signal refresh + LongShortPortfolio dispatch + ADR-048 SMART/LSEETF routing + per-symbol `order_type_by_symbol` override unchanged. Capture daily: per-instrument fill-rate, regime-flip count (long vs short equity-leg signal), warning-2161 cap-binding events, RiskEngine breach count, FSM-trace coverage (SUBMITTED → ACCEPTED → FILLED / CANCELED / REJECTED ratio). Substrate: INV-8 `metrics` MISSING → DRAFT v0.1 (M3.2 metrics catalogued — full Prometheus stack at M7); INV-9 `alerts` MISSING → DRAFT v0.1 (M3.2 alerts catalogued — full alerting at M7). Exit: data file ready for M3.3 decision.
+
+- **M3.3 — OQ-031 resolution.** Operator-led decision over the four OQ-031 options based on M3.2 evidence. New ADR (next free index after 049) records the chosen Option, with supersedes / amends chain as applicable. OQ-031 flips OPEN → RESOLVED-BY-ADR-NNN. Branch handling: Option 3 (substitute non-leveraged equity leg) amends [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) + universe re-validation half-session; Options 1 / 2 / 4 keep the strategy as-is, the chosen option is the deployment-mode commitment for G4.
+
+- **M3.4 — Mixed-currency P&L reconciliation.** Account-snapshot smoke during a M3.2-window paper-mode run with both legs at non-zero positions: QQL3 (USD) + IBTL / IBTM (GBP-hedged). Verify MaintMargin / GrossPositionValue / NetLiquidation reconcile correctly across the currency pair (M2-IB exercised the fields synthetically; M3 confirms the live shape per [RETRO-M2-IB §"Recommendations"](./docs/retros/M2-IB_retrospective.md) #4). The 30s diff-suppress AccountUpdate emission timer (per [ADR-033](./docs/decisions/DECISIONS.md#adr-033--accountupdate-emission-timer-30s-diff-suppress)) is the observation surface. Substrate: DD-2 v0.2 → v0.3 (mixed-currency footnote, if needed); KB-6 v0.1 → v0.2 (currency-pair section, if needed).
+
+- **M3.5 — INV-14 catalogue extension + chaos drills.** Forward-listed IB codes from [KB-3 §8](./docs/kb/ib_pacing_spec.md#8-error-code-mapping-at-pacing-boundary) (100 / 322 / 354 / 366 / 1100..1102 / 1300) promoted as they surface during the M3.2 window; INV-14 v0.7 → v0.8+ as the catalogue grows. Chaos drills: observe the daily 23:45 ET TWS restart during the 10-day window per [ADR-040](./docs/decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway) (operator-managed manual relogin); blive's reconciliation handles the disconnect/reconnect transient unchanged per [REQUIREMENTS §5.7](./REQUIREMENTS.md#57-reconciliation). Capture observed failure modes in KB-7 `failure_modes` MISSING → DRAFT v0.1 (chaos-drill catalogue from M3.5 observed drills only — full M4 catalogue defers to M4).
+
+- **M3.6 — KB-2 / KB-3 STABLE flip.** Write-side §3 / §4 / §6 / §7 surface in [KB-2](./docs/kb/ib_capability_matrix.md) / [KB-3](./docs/kb/ib_pacing_spec.md) now exercised through M2-IB.6's 2161 / PMA-cap edge cases + M3.2's 10-day window. Minor table refinements remain (per [RETRO-M2-IB §"Substrate transitions"](./docs/retros/M2-IB_retrospective.md) deferred-flip note). KB-2 v0.1.1 → v1.0 STABLE; KB-3 v0.1.1 → v1.0 STABLE.
+
+- **M3-close.** Write `docs/retros/M3_retrospective.md` per [`docs/retros/_template.md`](docs/retros/_template.md). Report G4 gate status. Replace `NEXT_PROMPT.md` (v1.x targeting M3.x → next version targeting first M4 / Phase 2 sub-milestone).
 
 **Deliverables:**
 
-1. **`IBBroker.submit() / cancel() / replace()`** — full FSM driven by IB callbacks (`orderStatus`, `execDetails`, `commissionReport`).
-2. **Order state machine observed in real time** — every transition emits a typed domain event; events persisted to in-memory log.
-3. **Reconciliation on startup** (basic version per [REQUIREMENTS §5.7](./REQUIREMENTS.md)) — `reqAllOpenOrders` + `reqPositions` on connect; diff against persisted state; venue authoritative; synthesise local events.
-4. **Smoke-test harness** (`tests_smoke/ib_paper/`) — manual integration tests against IB Paper. Marked `manual`; not in CI.
-5. **First strategy run** — `tkan_v4_momentum_timing` 1× loaded; runs against IB Paper for ≥ 5 trading days; NAV slice per [OQ-024](./docs/decisions/OPEN_QUESTIONS.md#oq-024--nav-slice-for-the-phase-1-strategy); CAC.PA per [OQ-025](./docs/decisions/OPEN_QUESTIONS.md#oq-025--which-cac-etf-proxy-for-the-phase-1-strategy).
-6. **Manual chaos drills** — simulated IB disconnect mid-fill; simulated reject; manual cancel from TWS UI; `kill -9` of blive process mid-trade. Each drill must produce a correct end-state after recovery.
+1. **EODHD-vs-IB sizing reconciliation** — QQL3 10× discrepancy fixed in code; RC-10 (price sanity) implemented per INV-4. (M3.1)
+2. **10-day paper-mode window data file** — daily per-instrument fill-rate, regime-flip events, cap-binding events, breach count, FSM-trace coverage; reproducible via the M3.2 driver. (M3.2)
+3. **OQ-031 resolution ADR** — chosen Option recorded with supersedes / amends chain. (M3.3)
+4. **Live mixed-currency P&L observation** — MaintMargin / GrossPositionValue / NetLiquidation reconciled across QQL3 (USD) + IBTL / IBTM (GBP-hedged). (M3.4)
+5. **INV-14 catalogue extension** — forward-listed codes promoted as observed during the M3.2 window. (M3.5)
+6. **KB-7 stub-DRAFT** — chaos-drill failure-mode catalogue from observed M3.5 drills (TWS restart, disconnect/reconnect; full M4 catalogue defers). (M3.5)
+7. **INV-8 stub-DRAFT** — fill-rate / cap-binding / regime-flip metrics catalogue (full Prometheus surface at M7). (M3.2)
+8. **INV-9 stub-DRAFT** — kill-switch alerts catalogue (full alerting at M7). (M3.2)
+9. **KB-15 stub-DRAFT** — unit-of-quote / reverse-split parity-methodology section (full M7 surface defers). (M3.1)
+10. **KB-2 / KB-3 STABLE flip** — write-side surface fully exercised. (M3.6)
+11. **RETRO-M3** — frozen on first write per [ADR-024](./docs/decisions/DECISIONS.md#adr-024--add-session-retrospective-artefact-type). (M3-close)
+12. **Successor `NEXT_PROMPT.md`** — version bump targeting first M4 / Phase 2 sub-milestone. (M3-close)
 
-**Substrate transitions:** INV-2 (order types) MISSING → DRAFT; INV-3 (TIFs) MISSING → DRAFT; KB-7 (failure modes) MISSING → DRAFT (chaos catalogue from observed M3 drills); INV-14 DRAFT → STABLE.
+**Substrate transitions:**
 
-**Exit criteria (G4 gate — the "M3 done" test):**
+- **OQ-031**: OPEN → RESOLVED-BY-ADR-NNN at M3.3 (NNN = new ADR for chosen Option).
+- **ADR-050+**: ACCEPTED, recording OQ-031 resolution + companion changes.
+- **KB-2** v0.1.1 DRAFT → v1.0 STABLE (M3.6).
+- **KB-3** v0.1.1 DRAFT → v1.0 STABLE (M3.6).
+- **KB-7** MISSING → DRAFT v0.1 (M3.5 chaos-drill catalogue).
+- **KB-15** MISSING → DRAFT v0.1 (M3.1 unit-of-quote section).
+- **INV-4** v0.1 DRAFT → v0.2 DRAFT (RC-10 row promoted to implemented).
+- **INV-8** MISSING → DRAFT v0.1 (M3.2 metrics catalogue).
+- **INV-9** MISSING → DRAFT v0.1 (M3.2 alerts catalogue).
+- **INV-14** v0.7 → v0.8+ (M3.2 / M3.5 observed-codes promotion).
+- **DD-2** v0.2 → v0.3 if M3.4 reveals new mixed-currency surface.
+- **KB-6** v0.1 → v0.2 if M3.4 reveals new currency-pair section needed.
+- **RETRO-M3** new → STABLE v1.0 (M3-close, frozen on first write).
 
-1. `tkan_v4_momentum_timing` 1× runs end-to-end on IB Paper for **≥ 5 trading days without manual intervention**.
-2. **≥ 5 round-trip orders** observed end-to-end; every FSM transition logged with `client_order_id`, `venue_order_id`, timestamp.
-3. **Simulated reject** correctly handled — FSM → `REJECTED`; alert fires; engine continues running.
-4. **Simulated cancel from TWS UI mid-order** correctly observed — FSM → `CANCELED`; alert fires; position unchanged.
-5. **`kill -9` mid-trade**, restart reconciles correctly — blive's positions match IB-side positions; no orphan orders; engine enters `paused` state per [ADR-009](./docs/decisions/DECISIONS.md#adr-009--crash-only-design); operator-resume succeeds.
-6. **Throttle headroom** — peak observed message rate ≤ 50% of IB's 50 msg/sec hard cap.
+**Exit criteria (G4 gate — rewritten for the deployment-decision framing):**
 
-**Estimated effort:** ~3–4 sessions, depending on IB Paper behaviour and number of chaos-drill iterations needed.
+1. **OQ-031 RESOLVED.** Chosen deployment-mode option (1 / 2 / 3 / 4) recorded as a new ADR with supersedes / amends chain, grounded in the M3.2 empirical data file. Decision is auditable: data → option chosen → why.
+2. **EODHD-vs-IB sizing reconciled.** QQL3 sizing produces correct USD-equivalent dollar exposure (within 1%); RC-10 (price sanity) implemented per INV-4 and exercised in production code.
+3. **10 LSE-RTH trading days of paper-mode data captured** at the substituted universe (`QQL3` / `IBTL` / `IBTM`), with: per-instrument fill-rate, ≥ 1 regime flip *or* explicit annotation that the window was regime-flat (Q2 quality check).
+4. **Mixed-currency P&L reconciled.** Live observation of QQL3 (USD) + IBTL / IBTM (GBP-hedged) at simultaneous non-zero positions; MaintMargin / GrossPositionValue / NetLiquidation match the synthetic shape from M2-IB.
+5. **Chaos drills survived.** ≥ 1 daily 23:45 ET TWS restart observed during M3.2; disconnect/reconnect handled; reconciliation correct on resume.
+6. **Phase 2 substrate stubs in place.** KB-7, KB-15, INV-8, INV-9 each at DRAFT v0.1 (M3-window content only — full M4/M7 catalogue defers).
+7. **KB-2 / KB-3 STABLE.** Both flipped from DRAFT v0.1.1 → v1.0 STABLE.
+8. **No M2-IB regressions.** G3-IB-A3 still passes; SMART/LSEETF routing still clean; FSM coverage still wire-validated.
+9. **RETRO-M3 written + frozen** per ADR-024.
+10. **Test suite green.** mypy --strict / black / isort / lint-imports / pytest all green at M3-close commit.
 
-**Dependencies:** M2 complete; G3 gate passed.
+**Estimated effort:** ~6–8 sessions across M3.1 → M3-close. Breakdown: M3.1 reconciliation (1–2 sessions; dominated by EODHD-vs-IB investigation + RC-10 implementation), M3.2 window (10 trading days wall-clock; ~3–4 monitoring sessions during the window), M3.3 OQ-031 resolution (1 session, operator-led; +0.5 if Option 3 chosen), M3.4 mixed-currency (lands inside M3.2; no separate session needed), M3.5 INV-14 + chaos drills (lands inside M3.2 window; KB-7 stub at M3.2 close), M3.6 KB-2 / KB-3 flip (substrate-only; ~1 session), M3-close (~1 session, RETRO + NEXT_PROMPT bump).
+
+**Dependencies:** M2-IB.6 closed (✓ at `M2-IB.6-close` 2026-05-06); Phase 2 readiness audit closed (✓ at commit `c5fb1b4`); operator availability for M3.2 window monitoring + M3.3 resolution + M3.4 mixed-currency entry timing.
 
 ---
 
 ## Sketched M4+ (post-Phase-1)
 
-The detailed plan stops at M3. M4+ are sketched here only to set expectations and to identify the artefact ladder Phase 2 will depend on:
+The detailed plan stops at M3. M4+ are sketched here only to set expectations and to identify the artefact ladder Phase 2 will depend on. **Refreshed 2026-05-06 at the M3 plan-drafting session** per [PHASE_2_READINESS Q5](./docs/PHASE_2_READINESS.md): M3 ships stub-DRAFTs only; full content lands in native milestones below.
 
-- **M4** — RiskEngine full (RC-01..RC-12); SQLite persistence (`PersistencePort` switches from in-memory to SQLite-backed per [ADR-006](./docs/decisions/DECISIONS.md#adr-006--sqlite-for-persistence-in-v1)); structured logging.
-- **M5** — Reconciliation continuous loop; daily TWS-restart handling first-class; `RUNBOOK.md` drafted; Phase 2 readiness audit.
+- **M4** — RiskEngine full (**RC-01..RC-07 + RC-11**; RC-10 already from M3.1; RC-08/09/12/13 already from M1); SQLite persistence ([DD-4 `storage_schemas`](./docs/dd/storage_schemas.md) MISSING → DRAFT, `PersistencePort` switches from in-memory to SQLite-backed per [ADR-006](./docs/decisions/DECISIONS.md#adr-006--sqlite-for-persistence-in-v1)); structured logging.
+  - **Refresh delta vs v0.4:** RC-10 carved out (lands at M3.1 instead). Rest unchanged — Q5's M3 stubs do not pull M4 work forward.
+- **M5** — Reconciliation continuous loop; daily TWS-restart handling first-class (extends M3.5's stub); `RUNBOOK.md` drafted; [KB-7 `failure_modes`](./docs/kb/failure_modes.md) extended from M3.5's stub-DRAFT to full catalogue.
+  - **Refresh delta vs v0.4:** Phase 2 readiness audit removed from M5 (executed early at the §8.3.2 phase boundary 2026-05-06). KB-7 framing shifts from "MISSING → DRAFT" to "extends M3's stub".
 - **M6** — Web UI (3 pages) per [ADR-011](./docs/decisions/DECISIONS.md#adr-011--3-page-minimal-web-ui-mobile-and-oauth-deferred); REST endpoints; SSE log stream.
-- **M7** — Parity diagnostic; observability (Prometheus + Grafana); KB-15 parity_methodology drafted.
+  - **Refresh delta vs v0.4:** unchanged.
+- **M7** — Full parity diagnostic (extends M3.1's narrow unit-of-quote reconciliation to full envelope re-derivation against the substituted universe); full Prometheus + Grafana observability ([INV-8 `metrics`](./docs/inv/metrics.md) + [INV-9 `alerts`](./docs/inv/alerts.md) extended from M3.2's stubs); [KB-15 `parity_methodology`](./docs/kb/parity_methodology.md) extended from M3.1's stub.
+  - **Refresh delta vs v0.4:** M3.1 pre-empted a small slice (unit-of-quote section only); M7 still owns the full parity envelope re-derivation against `QQL3` / `IBTL` / `IBTM` (regime profile shifts since 1× US-Treasury legs replace 3× per ADR-047; backtest CAGR / Sharpe / MDD do not carry forward). INV-8 / INV-9 / KB-15 framings shift from "MISSING → DRAFT" to "extends M3's stub".
 - **M8** — Hardening: TLS, audit-log hash chain, backup automation, ops runbook fully realised. Real-money cutover gate.
+  - **Refresh delta vs v0.4:** unchanged.
 
-Phase 2 begins at the entry to M4 with strategy `triple_lev_sma_filter_dsl` carried forward from the now-active Phase 1 A3 path (current live-paper tradables per ADR-047: `QQL3` / `IBTL` / `IBTM`). Phase 2 detailed plan is **not** drafted yet; it awaits M2-IB.6 close / the readiness-audit session so that calibrated risk thresholds and the observed parity envelope can inform the plan.
+Phase 2 begins at the entry to M4 with strategy `triple_lev_sma_filter_dsl` carried forward from the now-active Phase 1 A3 path (current live-paper tradables per ADR-047: `QQL3` / `IBTL` / `IBTM`), in whichever deployment-mode shape OQ-031 resolves to at M3.3. Phase 2 detailed plan is **not** drafted at this session — it awaits M3-close; M3 → M4 is itself the Phase 1 → Phase 2 boundary, likely warranting another §8.3.2-style transition informed by M3's empirical artefacts (OQ-031 resolution, observed parity envelope, chaos-drill failure modes, mixed-currency P&L shape).
 
 ---
 
@@ -327,7 +385,7 @@ A quality gate is a checkpoint at the boundary between milestones. The gate must
 | **G2** (M1 → M2) | btest equity-match within ±1 bps; M1 deliverables complete; operator-side prereqs verified | **PARTIAL 2026-04-27** (see [RETRO-M1](./docs/retros/M1_retrospective.md)) — pipeline machinery + 175 tests green; real-data ±1 bps run deferred to operator EODHD CAC.PA + TKAN artefact run |
 | **G3-IB-A3** (M2-IB.6 → Phase-2-readiness entry) | IB Gateway connect within 5s; ADR-047 PRIIPs premise empirically validated; resolver shape for the UK-listed universe reaches ACCEPTED cleanly; next available LSE-RTH run yields non-zero FILLED count with zero rejects / zero breaches; RETRO-M2-IB written | Oleg — **ACTIVE / PARTIAL 2026-05-06** (PRIIPs probe + broker fix ✓; LSE-RTH fill validation still pending) |
 | **G3-IG** (M2-IG → M2-IG.5 close) | IG demo read+write working; Lightstreamer + REST throttle green; session-token auto-refresh tested; `tkan_v4_momentum_timing` 1× runs ≥ 5 trading days on IG demo with directional alignment | Oleg — **NOT_REACHED 2026-04-28** (operator-driven bridge close before strategy run; not a gate failure — see [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md)) |
-| **G4** (M3 → M4 / Phase 2 entry) | All M2-IB.5 strategy-run criteria met; PHASE_2_READINESS audit drafted | Oleg — re-scoped at M2-IB.5 close (M3 may consolidate with M2-IB.4 per the M2-IB.4-vs-M3 note above) |
+| **G4** (M3 → M4 / Phase 2 entry) | All 10 M3 exit criteria met (OQ-031 RESOLVED + EODHD-vs-IB sizing reconciled + 10-day paper-mode window data captured + mixed-currency P&L reconciled + chaos drills survived + Phase 2 stub artefacts in place + KB-2/KB-3 STABLE + no M2-IB regressions + RETRO-M3 written + test suite green); deployment-mode commitment for live cutover is reviewable | Oleg — DRAFT at M3 plan-drafting session 2026-05-06; ACTIVE on first M3.1 commit |
 
 ---
 
@@ -353,6 +411,17 @@ Risks specific to Phase 1 (broader risks live in [REQUIREMENTS](./REQUIREMENTS.m
 | btest version drift breaks blive imports during Phase 1 | Medium | rebuild | Pin btest minor; CI smoke-imports check (M0 deliverable); coordination policy in [ADR-010](./docs/decisions/DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import) |
 | TKAN artefact retrained mid-Phase-1 produces non-stationary signal | Low | strategy underperforms | Acceptable on paper; revisit at G4 |
 | Parity envelope between CAC.PA price-return and CACT total-return wider than expected | High | documentation only | Document; do not block M3; feed into M7 parity diagnostic design |
+
+### Phase 2 entry risks (added 2026-05-06 at M3 plan-drafting)
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| **M3.2 paper-mode window observes zero regime flips on QQL3** | Medium | OQ-031 decision lacks regime-variety evidence | Q2 quality check at plan-drafting: M3-close annotates regime-flat windows; OQ-031 resolution explicitly notes data limitation; option to extend window if operator wishes |
+| **EODHD unit-of-quote reconciliation in M3.1 reveals deeper data-quality issues across the 5-ticker bundle** | Low | M3.1 scope balloons | M3.1 narrow scope: QQL3 only at first; broader audit deferred to M7 parity-envelope work |
+| **Live IB market-data subscription cost or eligibility for sizing reference** | Low | M3.1 implementation route choice | M3.1 carries two routes: (a) live IB market data, (b) EODHD-convention conversion at sizing time — operator chooses based on cost / friction |
+| **OQ-031 Option 3 (substitute non-leveraged equity leg) chosen at M3.3** | Medium | M3 timeline extends; M3.4 / M3.5 re-validate | Plan reserves a half-session for Option-3 amendment ADR + universe re-validation if chosen |
+| **Forward-listed IB error codes (322 dup orderId, 354, 366, etc.) surface during M3.2 window** | Medium | M3.5 INV-14 catalogue extension absorbs them | Expected; no separate mitigation beyond the planned catalogue work |
+| **Chaos drill (TWS daily 23:45 ET restart) reveals reconciliation gap** | Low | M5 work pulled forward into M3 | If gap surfaces, Q5's "stay in native milestone" bias revisited at M3-close; otherwise M5 reconciliation work stays at M5 |
 
 ---
 
@@ -392,4 +461,5 @@ Items still requiring Oleg's input or action:
 - **v0.2 (2026-04-27)** — **M2 split into M2-IB (PARKED) and M2-IG (ACTIVE)** per option (S) of operator-driven IG-demo-bridge pivot. Substrate authored: cross-cutting [ADR-034](./docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) (multi-broker registry pattern; extends ADR-004) and [ADR-035](./docs/decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets) (secrets handling discipline; ~/.blive/secrets/{broker}.env + redaction list) — both PROPOSED; first-batch IG-bridge substrate. Phase 1 specifics table grew an "M2-IG bridge path" column (CAC 40 CFD on IG demo; ADR-021 PAUSED for the bridge). Quality Gates table split G3 → G3-IB (DEFERRED) + G3-IG (ACTIVE). Risk register grew IG-specific rows. Open dependencies cleaned up for IG bridge. M2-IG sub-milestones .1 (substrate) / .2 (cross-cutting infra) / .3 (read side) / .4 (write side) / .5 (strategy run + retro) defined.
 - **v0.3 (2026-04-28)** — **M2-IG bridge CLOSED at architectural surface; M2-IB UNPARKED to ACTIVE.** Operator pivot: IB Paper account commissioned 2026-04-28 (enabled 2026-04-29). [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md) STABLE-on-first-write captures the bridge close: ~2 sessions delivered M2-IG.1 substrate + M2-IG.2 cross-cutting infra + M2-IG.3 read side + M2-IG.4 minimum-viable submit (7 tags placed; 359 tests). M2-IG.5 strategy run + production Lightstreamer wrapper DEFERRED with no scheduled revival. M2-IB resumption defined with sub-milestones M2-IB.1 (substrate verification) / .2 (IBClient + IBCredentials) / .3 (IBInstrumentResolver + read side + IBMarketData) / .4 (write side + reconciliation) / .5 (strategy run on IB Paper + RETRO-M2-IB). M2-IG section relabelled ARCHIVED (G3-IG NOT_REACHED, operator-driven close not gate failure). Phase 1 specifics table reverts to ADR-021 ETF path as canonical; ADR-039 CFD variant stays ACCEPTED but bridge-paused. Quality Gates: G3-IB ACTIVE; G3-IG NOT_REACHED. Risk register: IG-specific rows archived; IB-specific rows reasserted. Open dependencies updated: IG operator-side items closed; IB connection params + deployment target + first IB Gateway handshake opened. NEXT_PROMPT.md v0.4 drafted to target M2-IB.
 - **v0.4 (2026-05-02)** — **Phase 1 strategy switch per [ADR-043](./docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2): A3 (`triple_lev_sma_filter_dsl` on TQQQ/TMF/IEF) replaces A2 (`tkan_v4_momentum_timing` on CAC.PA).** ADR-021 SUPERSEDED-BY-ADR-043. M2-IB.5 closed at architectural surface 2026-05-02 (CLOSED-EARLY-BY-OPERATOR; the 60-bar replay validated the single-instrument pipeline + IB write-side wire across the M2-IB.4a-* tag chain — durable substrate, but no longer the strategy-run target). New milestone **M2-IB.6** opens with sub-milestones .6-substrate (this commit batch) / .6.1 (multi-instrument pipeline + 5-ticker EODHD refresh + LongShortPortfolio btest dispatch + IB SMART resolver convention) / .6.2 (IB Paper end-to-end run during US RTH for FILLED validation) / .6-close (RETRO-M2-IB + NEXT_PROMPT.md v0.6 targeting Phase 2 readiness audit per CONTEXT_PROTOCOL §8.3.2 phase-boundary protocol). Phase 1 specifics table rewritten to reflect the A3 path (5-ticker universe, SMART routing, LongShortPortfolio dispatch, EODHD-only data per ADR-017 hybrid routing — no IB market-data subscription needed for US ETFs at delayed-daily tier). G3-IB superseded by G3-IB-A3 (criteria amended for multi-instrument FSM + FILLED validation). New ADRs (companion): ADR-044 multi-instrument pipeline, ADR-045 LongShortPortfolio dispatch, ADR-046 IB SMART for US equities — all ACCEPTED in the next commit. A2 (`tkan_v4_momentum_timing`) marked DEFERRED-NO-TARGET; code stays in repo. KB-5 §7 phased priority reordered. INV-1 v0.1 → v0.2.
+- **v0.6 (2026-05-06)** — **M3 plan-drafted at the [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md) phase-boundary third session.** Replaces the legacy "M3 — IB Adapter (Write Side) & First Live (Paper) Strategy" section (which closed inside M2-IB.4 / M2-IB.6 already) with the **deployment-decision M3** plan — sub-milestones M3.1 (EODHD-vs-IB unit-of-quote reconciliation + RC-10) / M3.2 (10-day empirical paper-mode window) / M3.3 (OQ-031 resolution as new ADR) / M3.4 (mixed-currency P&L reconciliation) / M3.5 (INV-14 extension + chaos drills + KB-7 stub) / M3.6 (KB-2 / KB-3 STABLE flip) / M3-close. Five plan-drafting calls recorded inline (Q1 inform-then-resolve / Q2 10-day calendar-bound window / Q3 EODHD-vs-IB pull forward to M3 / Q4 A3-only / Q5 stub-DRAFT only what M3 produces). Sketched M4+ refreshed: M4 picks up RC-01..RC-07 + RC-11 (RC-10 carved out to M3.1); M5 loses Phase 2 readiness audit (already executed at the §8.3.2 boundary); M5 KB-7 / M7 INV-8 / INV-9 / KB-15 framings shift from "MISSING → DRAFT" to "extends M3's stub". G4 gate exit criteria rewritten around the 10 deployment-decision exit criteria (was: M2-IB.5 strategy-run criteria + PHASE_2_READINESS drafted; now: OQ-031 RESOLVED + EODHD-vs-IB sizing reconciled + 10-day window + mixed-currency + chaos drills + Phase 2 stubs + KB-2/3 STABLE + no regressions + RETRO-M3 + tests green). Risk register grows six Phase-2-entry rows (regime-flat window risk, EODHD broader data-quality risk, IB live-data-subscription risk, OQ-031 Option-3-amends risk, INV-14 catalogue-growth risk, chaos-drill reconciliation-gap risk). No new ADRs; no new OQs. Substrate-only session. Successor [NEXT_PROMPT.md](./NEXT_PROMPT.md) replaced v0.9 → v1.0 targeting M3.1.
 - **v0.5 (2026-05-06)** — Reconciled TASK_REGISTRY to the actual post-`abebc5a` repo state. M2-IB.6-substrate and M2-IB.6.1 marked complete; M2-IB.6.2 split conceptually into the now-complete US-RTH PRIIPs validation probe (ADR-047 empirically validated, broker `ib.errorEvent` stash fix landed, INV-14 v0.6) and the still-pending next-available LSE-RTH filled run for `QQL3` / `IBTL` / `IBTM`. ADR-048 recorded as intentionally PROPOSED-in-working-tree pending fill validation. Quality-gate and open-dependency sections updated so the only live blocker is the LSE-RTH operational window, after which M2-IB.6-close can write RETRO-M2-IB and hand off to either Phase 2 readiness or follow-up diagnosis.

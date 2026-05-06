@@ -1,136 +1,118 @@
-# Session kickoff prompt — M3 plan-drafting (paste into a fresh Claude Code session)
+# Session kickoff prompt — M3.1: EODHD-vs-IB unit-of-quote reconciliation (paste into a fresh Claude Code session)
 
 > Working directory must be `C:\Users\olegr\PycharmProjects\blive`. If your shell starts elsewhere, switch first.
 
 ---
 
-## You are the M3 plan-drafting session
+## You are the M3.1 session
 
-This project is `blive` — a multi-broker live execution engine, sibling to `btest`. M2-IB closed at the `M2-IB.6-close` commit on 2026-05-06; the Phase 2 readiness audit ([`docs/PHASE_2_READINESS.md`](./docs/PHASE_2_READINESS.md) DRAFT v0.1) was written in the session immediately following. Per [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md), the M2 → Phase 2 transition is the three-session pattern: **(1) implementation close** ✓ at `M2-IB.6-close` (RETRO-M2-IB frozen), **(2) readiness audit** ✓ (`PHASE_2_READINESS.md` DRAFT v0.1), **(3) this session — M3 plan-drafting**. Mixing modes is forbidden — this session produces an M3 entry in [`TASK_REGISTRY.md`](./TASK_REGISTRY.md), informed by operator answers to the audit's five cross-cutting questions. **Do NOT implement code in this session.**
+This project is `blive` — a multi-broker live execution engine, sibling to `btest`. Phase 1 entered its **deployment-decision milestone (M3)** at the [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md) third-session close on 2026-05-06; this `NEXT_PROMPT.md` v1.0 targets the **first M3 sub-milestone — M3.1: EODHD-vs-IB unit-of-quote reconciliation**.
 
 The project follows **Cognitive Cartography**: one fact has one home; stable IDs (`ADR-*`, `INV-*`, `DD-*`, `OQ-*`) are mandatory; ADRs / OQs / RETROs are append-only; `CONTEXT_INVENTORY.md` and `TASK_REGISTRY.md` must stay aligned with reality.
 
 ### State at session entry
 
-- **Head is at the Phase 2 readiness audit commit** — `docs/PHASE_2_READINESS.md` DRAFT v0.1 in the working tree (or already committed depending on which commit the audit session pushed); CONTEXT_INVENTORY §10 marks the audit complete and item #15 (M3 plan-drafting) as the front of the queue; this `NEXT_PROMPT.md` v0.9 targets the plan-drafting work.
-- **Tag `M2-IB.6-close`** marks the prior milestone close; no new tags expected from this session (tags land at *implementation* close, not at plan-drafting close).
-- **Substrate state**: ADRs 001–049 with ADR-021 SUPERSEDED-BY-ADR-043; OQ-031 OPEN (operator-deferred to M3 — *this is the load-bearing OQ for the plan*); INV-14 v0.7 with the four-run PMA-cap validation matrix; RETRO-M2-IB v1.0 frozen.
-- **Test count: 519** unit tests passing at `M2-IB.6-close`; mypy / black / isort / lint-imports all green.
+- **Head is at the M3 plan-drafted commit** ([`TASK_REGISTRY.md`](./TASK_REGISTRY.md) v0.6 with the deployment-decision M3 plan; five plan-drafting calls recorded inline; [`CONTEXT_INVENTORY.md`](./CONTEXT_INVENTORY.md) v0.13 with M3.1 as front-of-queue).
+- **No PROPOSED ADRs in working tree.** ADRs 001–049 ACCEPTED (021 SUPERSEDED-BY-043).
+- **Substrate state:** OQ-031 OPEN, target resolution at M3.3 based on M3.2 empirical evidence; INV-14 v0.7; RETRO-M2-IB v1.0 frozen; PHASE_2_READINESS.md DRAFT v0.1.
+- **Test count: 519** unit tests passing at the `M2-IB.6-close` commit; mypy / black / isort / lint-imports all green.
 
 ### What this session produces
 
-A `TASK_REGISTRY.md` update (bump version, add changelog entry) with:
+A code + substrate change addressing **the EODHD-vs-IB QQL3 ~10× price discrepancy** surfaced as a side-finding at M2-IB.6.2c ([RETRO-M2-IB](./docs/retros/M2-IB_retrospective.md) §"Surprises" #7). The discrepancy:
 
-1. **M3 detailed plan** at the same granularity as the closed M0 / M1 / M2-IB sections: goal, sub-milestones, deliverables, substrate transitions, exit criteria (G4 gate), estimated effort, dependencies. M3 is now the **Phase 1 deployment-decision milestone** — *not* the legacy "IB Adapter Write Side" framing (that closed inside M2-IB.4 / M2-IB.6 already). Per RETRO-M2-IB §"Recommendations", M3 sequences: empirical paper-mode fill-rate window → OQ-031 resolution → EODHD-vs-IB unit-of-quote reconciliation (timing TBD per the audit's Question 3) → INV-14 catalogue extension → mixed-currency P&L reconciliation → KB-2 / KB-3 STABLE flip.
-2. **M4..M8 sketch refresh**, milestone-headline level only, informed by the five cross-cutting questions resolved in this session. The existing M4..M8 sketch in `TASK_REGISTRY.md` §"Sketched M4+ (post-Phase-1)" is the starting point; refresh it where Phase 2 readiness moved the picture (e.g., if the operator decides M3 ships M7 parity-prep early, M7 weight reduces).
-3. **Quality Gate G4 redefinition** — the legacy G4 in `TASK_REGISTRY.md` §"Quality Gates" is shaped around the obsolete M3-write-side framing. Rewrite G4's exit criteria around the deployment-decision M3 and Phase 2 entry posture.
-4. **Risk register update** — Phase-1 risks that closed during M2-IB are already crossed out; add Phase-2-entry risks surfaced by the audit (e.g., Phase 2 substrate prerequisite gaps; M3 paper-mode-window calibration risk if the empirical window is too short to ground OQ-031).
+- EODHD reports QQL3 close ~$383, IB live reference ~$39 (~10× wider).
+- Strategy sizing using EODHD's price under-sizes positions ~10× in actual IB-dollar terms.
+- LMTs computed from EODHD close × multiplier produce **IB error 110** ("price not in allowed range") *before* warning 2161 (PMA cap) fires.
+- Likely a recent reverse-split on the leveraged ETP (common after 3× drawdowns) or an EODHD unit-of-quote convention.
 
-### What this session does NOT produce
+This contaminates the M3.2 empirical paper-mode window — under-sized positions don't generate the cap-binding behaviour the OQ-031 decision rests on. **Hence M3.1 ships first.**
 
-- **Code changes of any kind.** Substrate-only session, like the audit.
-- **New ADRs** unless a genuinely architectural choice surfaces while drafting (raise as `PROPOSED` only; do not pre-resolve).
-- **OQ-031 resolution** in code or config — the operator's chosen Option (1 / 2 / 3 / 4) feeds the M3 plan but the resolution itself is an M3 deliverable, not a plan-drafting deliverable.
-- **A wholly new `TASK_REGISTRY_PHASE_2.md`** unless scope warrants it (per CONTEXT_PROTOCOL §8.3.2 third paragraph). Default: keep one `TASK_REGISTRY.md` and add a "Phase 2 sketch" section. Split only if M4..M8 detail starts crowding the file.
+**Scope (narrow):**
+
+1. **Investigate the discrepancy.** Determine: is it a recent reverse-split, an EODHD unit-of-quote convention, or both? Likely investigation tools: EODHD splits-history API, reference-data probe, IB `reqContractDetails` for the conID, manual cross-check against published QQL3 reverse-split history (e.g. Bloomberg / issuer page).
+2. **Implement narrow-scope sizing fix — operator-decision (Route A vs Route B).** See "Operator agenda before code" below.
+3. **Implement RC-10 (price sanity)** in `blive.risk` per [INV-4](./docs/inv/risk_checks.md). Catches sizing-time discrepancies before IB error 110 surfaces. Configurable threshold (default: ±50% sanity band against last-known live reference price).
+4. **KB-15 `parity_methodology` stub-DRAFT.** Author the unit-of-quote / reverse-split section only; full M7 parity envelope defers to M7. The stub captures: data-source-specific unit-of-quote conventions, reverse-split detection / handling at sizing time, the QQL3 case as the canonical example. INV-4 RC-10 row promoted from DRAFT to implemented.
+5. **INV-14 grows** if new error codes surface during the investigation.
+
+**Out of scope (M3.1):**
+
+- Full M7 parity diagnostic surface (stays M7).
+- M3.2 empirical paper-mode window (M3.2; sequential after M3.1 lands).
+- OQ-031 resolution (M3.3; depends on M3.2 data).
+- Full RC catalogue implementation (M4 territory; only RC-10 here).
+- KB-7 / INV-8 / INV-9 stubs (M3.5 / M3.2 territories).
 
 ---
 
-## Step 1 — Warm-up (do this BEFORE any plan writing)
+## Step 1 — Warm-up (do this BEFORE any code)
 
 Per [CLAUDE.md](./CLAUDE.md):
 
-1. Read `CONTEXT_PROTOCOL.md` end-to-end — especially §8.3 (milestone-close + phase-boundary) and §8.3.2 (the third-session protocol that frames this work).
-2. Read `CONTEXT_INVENTORY.md` end-to-end — especially the new status banner and §10 priority queue items 14–15.
-3. Read `TASK_REGISTRY.md` end-to-end — closed milestones (M0 / M1 / M2-IG / M2-IB.1..M2-IB.6) for shape; the existing "Sketched M4+" section as the refresh starting point; the legacy "M3 — IB Adapter (Write Side)" section as the *to-be-rewritten* reference.
-4. Read [`docs/PHASE_2_READINESS.md`](./docs/PHASE_2_READINESS.md) end-to-end — *this is the load-bearing input*. The five cross-cutting questions at the top become the operator-input agenda.
-5. Read [`docs/retros/M2-IB_retrospective.md`](./docs/retros/M2-IB_retrospective.md) §"Recommendations for NEXT_PROMPT M3" — pre-staged recommendations from the close session.
-6. Skim [OQ-031](./docs/decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — its four resolution options frame the M3 plan's main branch.
-7. Skim [INV-14 v0.7](./docs/inv/ib_error_codes.md) §"Reason-extraction taxonomy" + warning 2161 row — the empirical evidence under OQ-031.
-8. Skim the `TASK_REGISTRY.md` "Risk register (Phase 1)" section — for the Phase 2 risk additions.
+1. Read [`CONTEXT_PROTOCOL.md`](./CONTEXT_PROTOCOL.md) — at minimum §0 TL;DR + §3 edit protocol + §3.5 anti-patterns.
+2. Read [`CONTEXT_INVENTORY.md`](./CONTEXT_INVENTORY.md) end-to-end — note v0.13 banner + §10 priority queue items 15 (M3 plan-drafted ✓) + 16 (M3.1 active).
+3. Read [`TASK_REGISTRY.md`](./TASK_REGISTRY.md) end-to-end — especially the new **M3 — Phase 1 Deployment Decision** section (sub-milestones, deliverables, exit criteria, the five plan-drafting calls inline).
+4. Read [`docs/retros/M2-IB_retrospective.md`](./docs/retros/M2-IB_retrospective.md) §"Surprises" #7 — the EODHD-vs-IB discrepancy framing.
+5. Read [INV-4](./docs/inv/risk_checks.md) — RC-10 row for price-sanity (current: DRAFT only; M3.1 implements).
+6. Read [INV-14 v0.7](./docs/inv/ib_error_codes.md) §"Error 110" — the surface that pre-empts warning 2161 with broken sizing.
+7. Skim `src/blive/runtime/ib_pipeline.py` and `scripts/run_m2ib6_ib_paper.py` — the load-bearing strategy run path; M3.1 sizing fix lands here.
+8. Skim `src/blive/sizing.py` — the current sizer; understand where the EODHD-derived price enters the order-size calculation.
 
-When warm-up is done, reply with the standard 5-line warm-up summary and wait for operator "go" before producing the plan.
-
----
-
-## Step 2 — Operator agenda before plan-drafting
-
-The operator answers the five cross-cutting questions from [`PHASE_2_READINESS.md`](./docs/PHASE_2_READINESS.md) §"Cross-cutting summary" *before* the agent drafts the plan. The agent should not pre-resolve any of these — surface them as a numbered list and wait for operator answers.
-
-The five questions, summarised:
-
-1. **OQ-031 sequencing.** M3 resolves it as a precondition, or M3 runs an empirical window that informs a later resolution?
-2. **Empirical fill-rate window scope.** Minimum trading-day count for statistically meaningful QQL3 fill-rate data?
-3. **EODHD-vs-IB unit-of-quote reconciliation timing.** M3 (M7 prep) or M7 proper?
-4. **Strategy-slot scope through Phase 1 deployment.** A3-only, or A1 / A1a as parallel candidates?
-5. **Phase 2 substrate prerequisites.** Which M4+ artefacts (KB-7, KB-15, full RC catalogue, DD-4, INV-8, INV-9) need DRAFT before Phase 2 entry?
-
-Each answer feeds a specific M3 sub-milestone and / or M4..M8 sketch refresh. Without operator answers, the plan would embed unverified defaults and re-introduce the phantom-decision risk CONTEXT_PROTOCOL §3.5 forbids.
+When warm-up is done, reply with the standard 5-line warm-up summary and **wait for operator "go"** before writing code.
 
 ---
 
-## Step 3 — Draft the M3 plan + M4..M8 sketch refresh
+## Step 2 — Operator agenda before code (Route A vs Route B)
 
-Mirror the M2-IB section's structure for M3:
+The narrow sizing fix has two viable routes. Surface both as a numbered list with a cost / friction sketch and **wait for operator answer** before implementing. Don't pre-resolve.
 
-```markdown
-### M3 — <name reflecting the deployment-decision framing> — <STATUS>
+- **Route A — IB live market data subscription for sizing reference.** Subscribe to `reqMktData` (or delayed-tier equivalent) for the tradable universe; sizer takes the live IB reference price instead of the EODHD close. Pros: authoritative, eliminates the unit-of-quote question entirely, sets up M7 parity diagnostics. Cons: monthly subscription cost (LSEETF tier per KB-2); depends on operator's IB tariff; latency footprint at sizing time.
+- **Route B — EODHD-convention conversion at sizing time.** Document EODHD's unit-of-quote convention (likely a specific currency / cents / pre-split-adjusted convention); apply a per-instrument multiplier at sizing so the EODHD close converts to the IB-equivalent price. Pros: zero subscription cost; immediate fix; reversible. Cons: per-instrument convention may differ; reverse-split events require manual catalogue updates; doesn't cover M7 parity diagnostics.
+- **Hybrid — B now, A later.** Route B as the immediate M3.1 fix; Route A as the M7 / live-cutover-time eventual replacement. Likely the lowest-friction path; would land as a small ADR.
 
-**Status:** <DRAFT | ACTIVE | …>
+If operator chooses hybrid (or any other multi-step path), a small ADR records the choice (with `PROPOSED → ACCEPTED` flip on first wire exercise per the M2-IB pattern).
 
-**Goal:** <one paragraph>
+---
 
-**Sub-milestones:**
+## Step 3 — Investigation, implementation, substrate
 
-- **M3.1 — <name>.** <one-paragraph description of work + substrate transitions>
-- **M3.2 — <name>.** …
-- …
-- **M3-close.** Write `RETRO-M3.md` per [`docs/retros/_template.md`](docs/retros/_template.md); replace `NEXT_PROMPT.md` v0.9 → v1.0 targeting Phase 2 entry.
-
-**Deliverables:** <numbered list>
-
-**Substrate transitions:** <which artefacts move which states>
-
-**Exit criteria (G4 gate):** <numbered list of testable criteria>
-
-**Estimated effort:** <session count>
-
-**Dependencies:** <prior milestone state>
-```
-
-For M4..M8, refresh the existing `TASK_REGISTRY.md` §"Sketched M4+" headlines per question (5)'s answer. No detailed deliverables — just headline + 1–2 lines of "what changed since the v0.1 sketch".
+1. **Investigation phase.** Probe scripts to confirm the discrepancy's origin. Likely shape: `scripts/probe_qql3_unit_of_quote.py` analogous to the existing PMA-cap probes. **Don't paper over the surprise** — list hypotheses, design refuting probes, capture the matrix, per [RETRO-M2-IB §"Recommendations for the discipline itself"](./docs/retros/M2-IB_retrospective.md) #2.
+2. **Implementation phase.** Once Route is chosen + investigation grounds the convention, implement the narrow sizing fix + RC-10. Tests for both. Wire the existing `scripts/run_m2ib6_ib_paper.py` to use the fixed sizing.
+3. **Substrate phase.** KB-15 stub-DRAFT (unit-of-quote section); INV-4 RC-10 row promoted; INV-14 if new codes surface; INV-1 / DD-7 footnotes if QQL3's reverse-split needs explicit handling.
 
 ---
 
 ## Step 4 — At session end
 
-1. Commit `TASK_REGISTRY.md` (and `CONTEXT_INVENTORY.md` priority queue update) with a clear commit message listing the M3 sub-milestones added and which audit questions the operator resolved this session. **Surface the commit message draft for confirmation before pushing**, per CLAUDE.md "Executing actions with care".
-2. Update `CONTEXT_INVENTORY.md` §10 priority queue: tick "M3 plan-drafting session" ✓ done; add "M3.1 execution" (or the first M3 sub-milestone) as the next-front-of-queue item.
-3. Update `CONTEXT_INVENTORY.md` status banner to reflect M3 plan ready and Phase 2 transition complete (the §8.3.2 three-session pattern fully discharged).
-4. Replace this `NEXT_PROMPT.md` v0.9 with **v1.0** — kickoff prompt for the first M3 sub-milestone session. v1.0 because this is the first NEXT_PROMPT to target post-Phase-2-transition implementation work; the v0.x line was the M2-IB transition arc.
+1. Commit code + substrate changes with a clear commit message listing artefacts touched + ADR raised (if any). **Surface the commit message draft for confirmation before pushing**, per [CLAUDE.md](./CLAUDE.md) "Executing actions with care".
+2. Update [`CONTEXT_INVENTORY.md`](./CONTEXT_INVENTORY.md) §10: tick "M3.1 ✓ done"; add **M3.2 — empirical paper-mode window** as next-front-of-queue.
+3. Update [`TASK_REGISTRY.md`](./TASK_REGISTRY.md) M3 section: tick M3.1 deliverable + substrate transitions actually shipped; bump version v0.6 → v0.7 with a changelog entry.
+4. Replace this `NEXT_PROMPT.md` v1.0 with **v1.1** — kickoff prompt for the M3.2 empirical paper-mode window session.
 
 ---
 
-## Step 5 — Hard constraints (out of scope this session)
+## Step 5 — Hard constraints
 
-- **Code changes of any kind.** Substrate-only.
-- **OQ-031 resolution as code / config.** The chosen Option informs the M3 plan; the resolution itself is an M3 deliverable.
-- **Implementation of M4+ work.** Sketch only; detail at the milestone's own plan-drafting session.
-- **Pre-resolving the five cross-cutting questions** without operator input.
+- **No M2-IB regressions.** All 519 tests must remain green; G3-IB-A3 must still pass; SMART/LSEETF routing unchanged.
+- **No M3.2 work.** The 10-day window is M3.2; M3.1 is sizing reconciliation only.
+- **No OQ-031 pre-resolution.** Working default per OQ-031 (Option 1) stands; OQ-031 resolves at M3.3 based on M3.2 evidence.
+- **Narrow KB-15 scope.** Unit-of-quote / reverse-split section only; full parity envelope stays M7.
 
 ---
 
 ## Step 6 — Discipline reminders
 
 - Stable IDs in conversation, comments, commit messages.
-- No new ADRs unless a genuinely architectural choice surfaces (it shouldn't in plan-drafting; if it does, raise as PROPOSED and surface).
-- The plan is a *snapshot* — it captures the M3 plan as of this session's wall-clock. Future updates land as new versions, not edits to past sub-milestone bodies.
+- ADRs only for genuinely architectural choices (Route A vs B is one such — raise as `PROPOSED` if needed; flip ACCEPTED on first wire exercise per the M2-IB pattern).
+- The plan is a snapshot — current TASK_REGISTRY M3 section captures the plan as of 2026-05-06; future updates land as new versions, not edits to past sub-milestone bodies.
 - Append-only — no editing past ADR / OQ / RETRO bodies; M3 sub-milestone descriptions can be updated as the milestone executes (they're plan, not retro).
 
 ---
 
 ## A note on this prompt itself
 
-`NEXT_PROMPT.md` v0.9 (this) was authored at the Phase 2 readiness audit close on 2026-05-06. The successor (v1.0 targeting the first M3 sub-milestone) is the §8.3.2 third-session deliverable at this plan-drafting session's close.
+`NEXT_PROMPT.md` v1.0 (this) was authored at the M3 plan-drafting session close on 2026-05-06 — the third and final session of the M2 → Phase 2 transition per [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md). v1.0 because this is the first NEXT_PROMPT to target post-Phase-2-transition implementation work; the v0.x line was the M2-IB transition arc. The successor (v1.1 targeting M3.2) is this M3.1 session's close-deliverable.
 
 When in doubt about anything: re-read the protocol, ask, do not guess.
 
