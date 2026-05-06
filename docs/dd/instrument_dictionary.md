@@ -3,8 +3,8 @@ id: DD-7
 title: Instrument Dictionary (`blive.Instrument` ↔ IB `Contract` / `ConID`)
 status: STABLE
 owner: Claude
-last_reviewed: 2026-05-02
-version: 1.1
+last_reviewed: 2026-05-06
+version: 1.3
 sources:
   - https://interactivebrokers.github.io/tws-api/contracts.html  # accessed 2026-04-27
   - https://github.com/ib-api-reloaded/ib_async                  # accessed 2026-04-27
@@ -74,21 +74,36 @@ Unsupported asset classes raise `InstrumentNotResolvable(instrument)` at the ada
 
 ## 3. `venue` (MIC) → IB `exchange` + (optional) `primaryExchange`
 
-Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) (2026-05-02 refinement of ADR-032), US-equity venues route via SMART with a `primaryExchange` hint; non-US venues retain direct routing. The `primaryExchange` column carries the IB-named exchange when `IB exchange` is `SMART`; otherwise `—`.
+Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) (US-equity SMART pattern) and [ADR-048](../decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) (LSE-ETF SMART discriminator), routing depends on both `venue` and `asset_class`:
 
-| MIC (ISO 10383) | IB `Contract.exchange` | `primaryExchange` (when SMART) | Used by |
-|---|---|---|---|
-| `XPAR` | `SBF` | — | Substrate for [ADR-021](../decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) (`CAC.PA`); SUPERSEDED-BY-ADR-043 as Phase 1 strategy designation, but the resolver path stays durable (M2-IB.4a-happy-cacpa wire validation). Direct routing requires API → Precautions bypass per `M2-IB.4a-happy-cacpa`. |
-| `XNAS` | **`SMART`** | `NASDAQ` | **Phase 1** (TQQQ / IEF on QQQ / IEF venue per [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)). Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). |
-| `XNYS` | **`SMART`** | `NYSE` | **Phase 1** (TMF on NYSE per [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)). Per ADR-046. |
-| `ARCX` | **`SMART`** | `ARCA` | Future US-equity strategies. Per ADR-046. |
-| `BATS` | **`SMART`** | `BATS` | Future US-equity strategies. Per ADR-046. |
-| `XLON` | `LSE` | — | **Phase 1** (UK-listed UCITS ETFs / ETPs per [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — `QQL3` / `IBTL` / `IBTM`); post-M8 also for UK cash equities ([ADR-018](../decisions/DECISIONS.md#adr-018--uk-equity-strategies-deferred-to-post-m8)). Direct-routed to LSE (SMART support varies for non-US venues per ADR-046; for UK-listed UCITS / ETPs LSE direct-routing is the standard). |
-| `XETR` | `IBIS` | — | future — direct routing. |
+- **US-equity venues** (XNAS / XNYS / ARCX / BATS) with `asset_class ∈ {EQUITY, ETF}` route via SMART with a `primaryExchange` hint.
+- **XLON ETFs** route via SMART with `primaryExchange="LSEETF"` (the LSE main book and the LSE-ETF book are distinct IB venues; UCITS / ETPs live on `LSEETF`, not the bare `LSE`).
+- **XLON cash equities** retain direct `LSE` routing.
+- **Other non-US venues** retain direct routing.
+
+The `primaryExchange` column carries the IB-named exchange when `IB exchange` is `SMART`; otherwise `—`.
+
+| MIC (ISO 10383) | `asset_class` discriminator | IB `Contract.exchange` | `primaryExchange` (when SMART) | Used by |
+|---|---|---|---|---|
+| `XPAR` | (any) | `SBF` | — | Substrate for [ADR-021](../decisions/DECISIONS.md#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) (`CAC.PA`); SUPERSEDED-BY-ADR-043 as Phase 1 strategy designation, but the resolver path stays durable (M2-IB.4a-happy-cacpa wire validation). Direct routing requires API → Precautions bypass per `M2-IB.4a-happy-cacpa`. |
+| `XNAS` | EQUITY / ETF | **`SMART`** | `NASDAQ` | Substrate for original-universe TQQQ / IEF (now substituted per [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043); resolver path stays durable). Per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). |
+| `XNYS` | EQUITY / ETF | **`SMART`** | `NYSE` | Substrate for original-universe TMF (now substituted per ADR-047). Per ADR-046. |
+| `ARCX` | EQUITY / ETF | **`SMART`** | `ARCA` | Future US-equity strategies. Per ADR-046. |
+| `BATS` | EQUITY / ETF | **`SMART`** | `BATS` | Future US-equity strategies. Per ADR-046. |
+| `XLON` | **EQUITY** | `LSE` | — | UK cash equities (post-M8 per [ADR-018](../decisions/DECISIONS.md#adr-018--uk-equity-strategies-deferred-to-post-m8)). LSE main book direct routing. |
+| `XLON` | **ETF** | **`SMART`** | **`LSEETF`** | **Phase 1** (UK-listed UCITS ETFs / ETPs per ADR-047 — `QQL3` / `IBTL` / `IBTM`). The LSE-ETF book is a distinct IB venue from the LSE main book; UCITS / ETPs do not resolve via bare `"LSE"`. SMART-routed via `primaryExchange="LSEETF"` per [ADR-048](../decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046). Wire-validated at M2-IB.6.2b/c (2026-05-06): contracts resolve cleanly; first IB-paper FILL on M2-IB.6 landed via this routing. |
+| `XETR` | (any) | `IBIS` | — | future — direct routing. |
 
 Sourced from [KB-2 §5](../kb/ib_capability_matrix.md#5-routing). Unknown MICs raise `InstrumentNotResolvable`; the operator extends the table when a new venue lands.
 
-**SMART vs direct discriminator**: the resolver applies the SMART convention when `instrument.venue` is in the **US-SMART set** (`XNAS`, `XNYS`, `ARCX`, `BATS`) AND `instrument.tradability == "spot"` AND `instrument.asset_class ∈ {EQUITY, ETF}`. Other combinations (CFD / spread_bet, non-US venues, options / futures) bypass the SMART logic — CFD/spread_bet are IG-side per ADR-037; options/futures grow their own routing table when those asset classes land.
+**SMART vs direct discriminator**: the resolver applies SMART routing when:
+
+1. `instrument.venue ∈ {XNAS, XNYS, ARCX, BATS}` (the US-SMART set per ADR-046) AND `instrument.tradability == "spot"` AND `instrument.asset_class ∈ {EQUITY, ETF}`, OR
+2. `instrument.venue == "XLON"` AND `instrument.asset_class == ETF` (the LSE-ETF discriminator per ADR-048; XLON main-book equities keep direct routing).
+
+Other combinations (CFD / spread_bet, non-US/non-XLON-ETF venues, options / futures) bypass the SMART logic — CFD/spread_bet are IG-side per [ADR-037](../decisions/DECISIONS.md#adr-037--instrumenttradability-field-spot--cfd--spread_bet); options/futures grow their own routing table when those asset classes land.
+
+**Note on IB warning 2161 (Price Management Algo)**: orders on volatile / leveraged products on the `LSEETF` venue (e.g. `QQL3`) trigger IB's regulatory disruptive-orders price-cap regardless of order type (MKT / `OrderType.ADAPTIVE_MKT` / LMT — all empirically validated subject to the cap on UK retail accounts at M2-IB.6.2c). This is not a routing concern — the resolver delivers the right contract to the wire — but a fill-quality concern documented in [INV-14 v0.7](../inv/ib_error_codes.md) and [OQ-031](../decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account).
 
 ## 3.1 Yahoo Finance / EODHD exchange-suffix → MIC
 
@@ -164,3 +179,4 @@ None blocking M2. When Phase 2 introduces multi-venue routing for the same instr
 - **v1.0 (2026-05-01)** — M2-IB.3a-resolved STABLE flip. The Phase 1 instrument `Instrument(symbol="CAC.PA", venue="XPAR", currency="EUR", asset_class=ETF, tradability="spot")` resolved cleanly against IB Paper Gateway (`scripts/probe_ib_resolve_contract.py` reported `conId=11183823 primaryExchange=SBF` in 0.04s; cache hit on second resolve in 0ms). DD-7 §1 field map + §2 secType table + §3 MIC→exchange table + §4 ConID lazy-resolve + §5 IBInstrumentResolver contract + new §3.1 Yahoo-suffix sub-table all empirically validated. Added §3.1 (Yahoo Finance / EODHD exchange-suffix → MIC) per [ADR-041](../decisions/DECISIONS.md#adr-041--yahoo-suffix-translation-in-ib-instrument-resolver) — IB resolver strips `.PA` / `.L` / `.DE` / `.AS` suffixes when the suffix matches the venue MIC. Status DRAFT → STABLE; future venue additions to §3 / §3.1 are routine refinements rather than substrate-flipping changes.
 - **v1.1 (2026-05-02)** — §3 venue table grew a `primaryExchange` column per [ADR-046](../decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032). US-equity venues (XNAS / XNYS / ARCX / BATS) route via `exchange="SMART"` with the `primaryExchange` hint set; non-US venues (XPAR / XLON / XETR) retain direct routing. SMART vs direct discriminator codified: applies when `venue` is in the US-SMART set AND `tradability="spot"` AND `asset_class ∈ {EQUITY, ETF}`. Added load-bearing for [ADR-043](../decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)'s A3 strategy on TQQQ/TMF/IEF; production resolver implements at M2-IB.6.1 (the probe-local `_SmartUsResolver` in `scripts/probe_ib_submit.py` is the prototype). XPAR / SBF row carries forward the substrate-durable note (CAC.PA stays wire-validated; only the Phase 1 strategy designation moved per ADR-043). STABLE preserved across this refinement.
 - **v1.2 (2026-05-03)** — §3 XLON row "Used by" annotation updated for Phase 1 use per [ADR-047](../decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043). UK retail accounts trading PRIIPs-compliant UCITS ETFs / ETPs (QQL3 / IBTL / IBTM) on LSE is now Phase 1 (M2-IB.6) — no longer post-M8-only via UK cash equities. LSE remains direct-routed (SMART discriminator scope unchanged: US venues only). STABLE preserved; this is a routine annotation refinement, not a structural change.
+- **v1.3 (2026-05-06 / M2-IB.6 close)** — §3 XLON row split by `asset_class` per [ADR-048](../decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) (flipped PROPOSED → ACCEPTED at this close). The LSE main book and the LSE-ETF book are distinct IB venues: UCITS / ETPs live on `LSEETF` and do NOT resolve via bare `"LSE"` (empirically confirmed at M2-IB.6.2b/c via `reqContractDetails` probe — `Stock(symbol='QQL3', exchange='LSE', currency='USD')` returns 0 results / error 200; `Contract(symbol='QQL3', exchange='SMART', primaryExchange='LSEETF', currency='USD')` resolves to conId 566361457). New row: `XLON + ETF → SMART/primaryExchange=LSEETF`; existing row: `XLON + EQUITY → LSE` (direct, unchanged). SMART vs direct discriminator extended to include the LSE-ETF case alongside the existing US-SMART set. Added an explicit annotation about IB warning 2161 (Price Management Algo regulatory disruptive-orders cap) — applies to volatile / leveraged products on LSEETF regardless of order type (MKT / `OrderType.ADAPTIVE_MKT` / LMT all subject; empirically validated at M2-IB.6.2c); routing is correct, fill-quality is the operator concern documented in [INV-14 v0.7](../inv/ib_error_codes.md) and [OQ-031](../decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account). STABLE preserved across this refinement (the discriminator widens; existing routes unchanged).

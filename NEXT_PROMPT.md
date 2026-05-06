@@ -1,236 +1,142 @@
-# Session kickoff prompt — M2-IB.6.2 PRIIPs probe + LSE-RTH validation (paste into a fresh Claude Code session)
+# Session kickoff prompt — Phase 2 readiness audit (paste into a fresh Claude Code session)
 
 > Working directory must be `C:\Users\olegr\PycharmProjects\blive`. If your shell starts elsewhere, switch first.
 
 ---
 
-## You are joining a disciplined project mid-M2-IB.6.2
+## You are the Phase 2 readiness audit session
 
-This project is `blive` — a *multi-broker* live algorithmic-execution engine, sibling to `btest`. Supported brokers via the [ADR-034](docs/decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004) multi-broker registry are **Interactive Brokers (IB)** and **IG**, plus paper / mock for development. Current integration milestone is M2-IB.6 (multi-instrument paper run for the Phase 1 A3 strategy `triple_lev_sma_filter_dsl` per [ADR-043](docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)). Run by Oleg Roshka, a UK-based independent quant researcher.
+This project is `blive` — a multi-broker live execution engine, sibling to `btest`. The current integration focus has just closed M2-IB (Interactive Brokers paper-mode A3 strategy). Phase 1 is wire-validated end-to-end against IB Paper for the substituted PRIIPs-compliant universe; the architectural surface for Phase 1 deployment is fully in place.
 
-The project practises **Cognitive Cartography**, a substrate-engineering discipline articulated in `CONTEXT_PROTOCOL.md` and the methodology paper at `docs/method/paper/cognitive_cartography.tex`. Every fact has one home; cross-references use stable IDs; decisions are append-only ADRs; questions are append-only OQs; status lifecycle is explicit; an edit protocol governs all changes.
+**This session is the Phase 2 readiness audit per [CONTEXT_PROTOCOL §8.3.2](./CONTEXT_PROTOCOL.md).** Per the phase-boundary protocol, three separate sessions span M2 → M3 / Phase 2 entry: **(1) milestone close** (M2-IB.6 retrospective; done at commit `[hash]` 2026-05-06), **(2) this readiness audit**, **(3) plan-drafting for M3 / Phase 2**. Mixing modes is forbidden — this session produces `docs/PHASE_2_READINESS.md` modelled on `docs/PHASE_1_READINESS.md`, *informed by the real outcomes of M2-IB*. **Do NOT draft the M3 / Phase 2 plan in this session.**
 
-**State at session entry** (most-recent commit on `origin/main`: `c34267d` — *"M2-IB.6.2 Path A: LSE-ETF SMART routing + IBTL/IBTM GBP currency"*):
+The project follows **Cognitive Cartography**: one fact has one home; stable IDs (`ADR-*`, `INV-*`, `DD-*`, `OQ-*`) are mandatory; ADRs / OQs / RETROs are append-only; `CONTEXT_INVENTORY.md` and `TASK_REGISTRY.md` must stay aligned with reality.
 
-- **M2-IB.4a / M2-IB.5 closed** earlier; substrate path through M2-IB.6.1 landed: ADR-043, ADR-044, ADR-045, ADR-046, ADR-047 all ACCEPTED; the multi-instrument pipeline + LongShortPortfolio btest dispatch + IB resolver SMART routing for US equities are wire-validated.
-- **M2-IB.6.1 wire run (Sun 2026-05-03)** against the original ADR-043 universe (TQQQ / TMF / IEF) produced **104 PRIIPs / KID rejections** (IB error 201, reason text *"This product does not have a KID in English…"*). [ADR-047](docs/decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) substituted UK-listed analogues: **QQL3** (3× Nasdaq-100 ETP), **IBTL** (1× 20+yr US-Treasury UCITS — *no UK 3× US-Treasury exists; strategy regime shifts 3×/3× → 3×/1×*), **IBTM** (1× 7-10yr US-Treasury UCITS). All on LSE.
-- **M2-IB.6.2 wire smoke (Sun 2026-05-03, post-ADR-047)** initially returned IB error 200 on every order against the new universe — `XLON → "LSE"` direct routing was wrong: IB exposes UCITS / ETPs on `LSEETF`, a distinct venue. Probed via `reqContractDetails` and confirmed all three resolve via `Contract(exchange="SMART", primaryExchange="LSEETF")`.
-  - **QQL3** → conId 566361457, currency USD ("3X US TECH 100").
-  - **IBTL** → conId 181150859, currency **GBP** ("ISHARES USD TRES 20+yr" GBP-hedged accumulating).
-  - **IBTM** → conId 68489974,  currency **GBP** ("ISHARES USD TREASURY 7-10Y" GBP-hedged accumulating).
-- **Resolver fix landed in `c34267d`**: `XLON + ETF → SMART/primaryExchange=LSEETF`; `XLON + EQUITY` keeps direct `LSE` routing. `IBTL` / `IBTM` Instrument records updated to `currency="GBP"`. Phase 1 P&L is now mixed-currency on the IB side; the M7 parity envelope absorbs the divergence (already noted in ADR-047).
-- **Re-run of `scripts/run_m2ib6_ib_paper.py --max-bars 5`** produced **submitted 10 / accepted 10 / canceled 10 / rejected 0 / breaches 0**: contracts resolve cleanly, no PRIIPs / KID surfaces under the LSE universe, all orders reach `PreSubmitted` and warning 399 ("order held until 2026-05-05 09:00 MET"), then engine-cancel at the 10s timeout because LSE is closed (Sun + UK May Day Bank Holiday Mon).
-- **ADR-048 PROPOSED is drafted but UNCOMMITTED** in the working tree. It codifies the LSE-ETF SMART discriminator (`XLON + ETF → SMART/LSEETF`) as a refinement of ADR-046. Held PROPOSED-uncommitted until Tuesday's LSE RTH window actually produces fills. See **operator decision tree** below.
-- **Today's wire status**: `c34267d` is the head; ADR-048 changes sit in working tree as uncommitted modifications to `docs/decisions/DECISIONS.md`. `git status` will show this; do not stash or revert without reading the rest of this prompt.
+### State at session entry
 
-**Open question driving this session** (uncommitted as of session entry; see [decision tree](#today-decision-tree)): is **PRIIPs / KID** genuinely a hard regulatory block on TQQQ / TMF / IEF for the operator's UK retail IB Paper account, *or* could the M2-IB.6.1 weekend run have surfaced PRIIPs reason text under conditions where the underlying cause was actually market-time? The answer determines whether ADR-047 (universe substitution) is empirically validated or speculatively over-applied.
+- **Head is the M2-IB.6-close commit** — substrate ladder closed: ADR-048 + ADR-049 ACCEPTED, DD-7 §3 amended (XLON split by `asset_class`), RETRO-M2-IB written + frozen, INV-14 v0.7 with the four-run PMA-cap validation matrix.
+- **Tag `M2-IB.6-close`** marks the milestone close.
+- **Test count: 519** unit tests passing; mypy / black / isort / lint-imports gates all green.
+- **First IB-paper FILL on M2-IB.6** landed Wed 2026-05-06 09:33 BST: IBTM 19 × £128.5 via `Contract(exchange="SMART", primaryExchange="LSEETF")`.
 
----
+### Live findings the audit must absorb
 
-## Today's mission
+Three real-world wire findings from M2-IB that Phase 2 readiness inherits:
 
-A two-day operational window:
+1. **PRIIPs / KID hard block on US-domiciled ETFs for UK retail** — original A3 universe (TQQQ/TMF/IEF) is broker-rejected by IB UK at order acceptance. Substituted to UK-listed UCITS / ETP analogues per [ADR-047](./docs/decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) (QQL3 / IBTL / IBTM). Strategy regime profile shifts because no UK-listed 3× US-Treasury exists (bond leg 3× → 1×).
+2. **LSE main book vs LSEETF venue split** — UCITS / ETPs require `Contract(exchange="SMART", primaryExchange="LSEETF")`; bare `LSE` returns IB error 200. Codified in [ADR-048](./docs/decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) + DD-7 §3 split-by-`asset_class`.
+3. **IB warning 2161 PMA-cap binds structurally on UK retail leveraged ETPs** — empirically validated across MKT, `OrderType.ADAPTIVE_MKT`, and LMT (4-run wire matrix). `priceManagementOff` is institutional-only. Captured in [INV-14 v0.7](./docs/inv/ib_error_codes.md), [ADR-049](./docs/decisions/DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding), [OQ-031](./docs/decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account). **Operator decided at M2-IB.6 close to address OQ-031 in M3, not block close.**
 
-| Day | Wire test | Purpose | Time window (UTC) |
-|---|---|---|---|
-| **Mon 2026-05-04** | `scripts/probe_tqqq_us_rth.py` (single-shot) | Validate ADR-047 PRIIPs premise | NYSE/NASDAQ open: 13:30–20:00 UTC |
-| **Tue 2026-05-05** | `scripts/run_m2ib6_ib_paper.py --max-bars N` | M2-IB.6.2 LSE RTH fills | LSE open: 07:00–15:30 UTC |
-
-**Decision tree:**
-
-1. **Mon probe → REJECTED with PRIIPs / KID reason text** (expected; exit code 0):
-   - ADR-047 premise validated empirically.
-   - Proceed to Tuesday LSE RTH run.
-   - Expect fills on the eligible legs (eligibility from `~/.blive/data/signals/triple_lev_sma_eligible.parquet`).
-   - On Tuesday fills: flip ADR-048 PROPOSED → ACCEPTED in same commit as DD-7 §3 amendment, then close M2-IB.6 with a retro.
-
-2. **Mon probe → REJECTED with non-PRIIPs reason** (mis-attribution; exit code 1):
-   - Stop. Capture the reason text. Re-investigate ADR-047.
-   - Possible paths: revisit the substitution (Path C — full revert), or amend ADR-047 with the corrected cause.
-   - Do NOT proceed to Tuesday run until ADR-047 is re-grounded.
-
-3. **Mon probe → ACCEPTED / FILLED** (major surprise; exit code 4):
-   - PRIIPs is somehow not enforced under this wire path.
-   - Stop. Investigate possible causes (IB Paper relaxation? account misclassification? pre-existing transient?).
-   - May warrant reverting ADR-047 + ADR-048 PROPOSED entirely; original TQQQ / TMF / IEF universe back in scope.
-   - Do NOT proceed to Tuesday run; the substrate-of-record needs revision first.
-
-4. **Mon probe → no terminal event / inconclusive** (exit code 5):
-   - Re-run later in the same RTH window with cleaner conditions (warmer cache, no recent restart).
-   - If still inconclusive after a second attempt: surface to operator and consult before Tuesday.
-
-The probe is in `scripts/probe_tqqq_us_rth.py` (committed at session entry). Single LMT BUY of 1 share of TQQQ at $1 (won't fill if accepted; cancel cycle handles ACCEPTED defensively). Run at any point during US RTH on Monday.
-
-The Tuesday run is the existing `scripts/run_m2ib6_ib_paper.py` — re-fire as-is. The fixture data at `~/.blive/data/eodhd/` and `~/.blive/data/signals/` is current as of 2026-05-03; refresh isn't strictly needed but is safe (`uv run python scripts/refresh_eodhd_signals.py`).
+These findings shift Phase 2 readiness from a paper-clean architectural exercise to a deployment-decision-gated one.
 
 ---
 
-## Step 1 — Warm-up (do this BEFORE any work, in order)
+## Step 1 — Warm-up (do this BEFORE any audit writing)
 
-Per [CLAUDE.md](CLAUDE.md):
+Per [CLAUDE.md](./CLAUDE.md):
 
-1. Read `CONTEXT_PROTOCOL.md` §0 TL;DR + §3 edit protocol + §3.5 anti-patterns.
-2. Read `CONTEXT_INVENTORY.md` end-to-end — §10 priority queue is the load-bearing source of truth on current state.
-3. Read `TASK_REGISTRY.md` M2-IB.6 section — note the .6.1 / .6.2 / .6-close ladder.
-4. Skim:
-   - [ADR-043](docs/decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) — Phase 1 strategy switch.
-   - [ADR-046](docs/decisions/DECISIONS.md#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) — US-equity SMART pattern (the shape ADR-048 mirrors).
-   - [ADR-047](docs/decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — PRIIPs-compliant universe (load-bearing for this session's probe).
-   - [ADR-048 PROPOSED](docs/decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) — LSE-ETF SMART discriminator (UNCOMMITTED in working tree).
-   - [INV-14 v0.5](docs/inv/ib_error_codes.md) — error 201 PRIIPs-KID variant.
-   - [KB-9 §5.5](docs/kb/uk_regulatory.md) — PRIIPs / KID for UK retail clients.
-5. Read commit body of `c34267d` (the resolver-fix commit) — it captures the `reqContractDetails` probe output that motivates ADR-048.
-6. Read `scripts/probe_tqqq_us_rth.py` end-to-end — understand the three-outcome decision tree before firing it.
-7. Read `scripts/run_m2ib6_ib_paper.py` (especially the Instrument-records block) and `scripts/refresh_eodhd_signals.py`.
+1. Read `CONTEXT_PROTOCOL.md` end-to-end — especially §8.3 (milestone-close + phase-boundary) and §8.3.2 (the three-session phase-boundary protocol that frames this session).
+2. Read `CONTEXT_INVENTORY.md` end-to-end — especially §10 priority queue (now reflects M2-IB closed).
+3. Read `TASK_REGISTRY.md` — M2-IB.6 section (now CLOSED), and the M3 / M4+ sketch sections.
+4. Read [`docs/retros/M2-IB_retrospective.md`](./docs/retros/M2-IB_retrospective.md) end-to-end — *this is the load-bearing input for the audit*. Its §"Recommendations for NEXT_PROMPT M3" pre-stages the audit's findings.
+5. Read [`docs/PHASE_1_READINESS.md`](./docs/PHASE_1_READINESS.md) end-to-end — this is the template + reference shape for `PHASE_2_READINESS.md`.
+6. Skim the M2-IB ladder retros for context: [RETRO-M0](./docs/retros/M0_retrospective.md), [RETRO-M1](./docs/retros/M1_retrospective.md), [RETRO-M2-IG](./docs/retros/M2-IG_retrospective.md).
+7. Skim the load-bearing ADRs from M2-IB: 043 (Phase 1 strategy switch), 044 (multi-instrument pipeline), 045 (LongShortPortfolio dispatch), 046 (US-equity SMART), 047 (PRIIPs universe), 048 (LSE-ETF SMART), 049 (ADAPTIVE_MKT + PMA-cap finding). Frontmatter + body for each.
+8. Skim [INV-14 v0.7](./docs/inv/ib_error_codes.md) for the IB error / warning surface that Phase 2 inherits.
+9. Skim [OQ-031](./docs/decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — its four resolution options frame a chunk of the audit.
 
-When you finish warm-up, reply with a 5-line summary:
-
-```
-Warm-up complete. I have read:
-- [list the artefacts you read]
-
-Project state: [M2-IB.6.2 mid-validation; PRIIPs probe + LSE RTH run pending;
-ADR-048 PROPOSED uncommitted; current head c34267d.]
-
-I propose to start by: [first concrete action — typically running the Mon probe
-during US RTH if today is Mon during 13:30-20:00 UTC, else surfacing the wait]
-```
-
-Wait for "go" before producing code or firing wire actions.
+When warm-up is done, reply with the standard 5-line warm-up summary and wait for operator "go" before producing the readiness audit.
 
 ---
 
-## Step 2 — Today's mission, in detail
+## Step 2 — Produce `docs/PHASE_2_READINESS.md`
 
-### 2.1 Confirm prereqs are still in place
+Mirror the eight-dimension structure of `PHASE_1_READINESS.md`. For each dimension, evaluate where Phase 2 stands (READY / GAPS / BLOCKED) and what work it requires. Do not list M3 plan items — list *readiness questions* whose answers feed the M3 plan-drafting session.
 
-The wire setup needs:
+### Suggested dimensions (match Phase 1 structure unless a dimension no longer applies)
 
-- IB Gateway running on the operator's host, port 4002 (paper).
-- "Read-Only API" unchecked under Configuration → API → Settings.
-- "Bypass Order Precautions for API Orders" (item #1) ticked under Configuration → API → Precautions. (For LSE ETFs via SMART/LSEETF this isn't strictly required — SMART avoids the direct-routing precaution at error 10311 — but keep it ticked from the M2-IB.4a-happy-cacpa setup.)
-- `~/.blive/secrets/ib.env` populated.
-- `~/.blive/data/eodhd/{QQL3,IBTL,IBTM,QQQ,TLT}_1d.parquet` populated (already there from 2026-05-03 refresh).
-- `~/.blive/data/signals/triple_lev_sma_eligible.parquet` populated (same refresh).
+1. **Strategy & universe** — A3 wire-validated on UK-listed substitution. Phase 2's A1 (`xsec_momentum_long_short_sp500`), A1a (`lagging_indecies`), or post-A3-deployment expansion candidates? OQ-031 deferred to M3 — readiness question: at what point does Phase 2 entry require OQ-031 resolved vs. at what point is it ortholgonal?
+2. **Data feeds** — EODHD is the cross-sectional Phase 2 likely candidate. The M2-IB.6.2c side-finding (EODHD-vs-IB QQL3 10× price discrepancy) is a real M7 parity concern; readiness question: does Phase 2 entry require the EODHD unit-of-quote convention reconciled or live IB market data subscription?
+3. **Engine surface** — `OrderType.ADAPTIVE_MKT` shipped; per-symbol `order_type_by_symbol` override on `run_ib_multi_pipeline`; multi-instrument pipeline wire-validated. Readiness question: does Phase 2 require any new order types (e.g. `MOC` / `LOC` / `OPG` for end-of-day rebalance), or is the current surface sufficient?
+4. **Risk engine** — RC-08 / RC-09 / RC-12 / RC-13 active per M1 (basic gross-leverage / per-instrument cap / per-strategy NAV cap / killswitch); breaches stayed at 0 across all M2-IB wire runs. Readiness question: does Phase 2 require the full RC-01..RC-08 catalogue, or does the M1 subset stay sufficient?
+5. **Reconciliation (M5 territory)** — paused throughout M2-IB. Readiness question: does Phase 2 require M5 reconciliation in scope, or is paper-mode-with-process-restart still acceptable?
+6. **Operations / observability** — daily NDJSON trade tape unverified at scale; AccountUpdate emission timer at 30s diff-suppress validated; ConnectionStatus / FreshnessWarning surfaces exist. Readiness question: what observability is *load-bearing* for Phase 2 vs nice-to-have?
+7. **Regulatory / compliance** — PRIIPs / KID reach catalogued in KB-9 §5.5. Readiness question: are there other regulatory surfaces Phase 2 introduces (cross-exchange? CFD via IG? non-UK accounts?) that need pre-flight diligence?
+8. **OQs that gate Phase 2 entry** — OQ-012 (parity tolerance bands; M7 work — does Phase 2 entry need it resolved?), OQ-023 (ForgeFolio integration; post-M8 — confirm still post-M8), OQ-028 / OQ-029 (L0+L1 agentic work), OQ-031 (PMA-bound retail).
 
-If anything has drifted — e.g., IB Gateway isn't running, or the operator restarted Windows and the bypass got reset — surface it before proceeding. Do NOT guess.
+### What the audit produces
 
-A quick handshake sanity check: `uv run python scripts/probe_ib_handshake.py` — should connect cleanly within 1s.
+For each dimension:
+- **READY** — sub-bullet listing the substrate that's in place
+- **GAPS** — sub-bullet listing what's missing or weak
+- **BLOCKED** — sub-bullet listing dependencies on operator action / OQ resolution / external state
+- **Phase 2 entry question** — single sentence
 
-### 2.2 Monday: PRIIPs validation probe (US RTH)
+Cross-cutting summary at the top: ≤ 5 questions whose answers gate the M3 plan-drafting session. These become the *agenda* for the plan-drafting session, not its output.
 
+### What the audit does NOT produce
+
+- A milestone plan for M3 (that's the next session).
+- New ADRs (raise as `PROPOSED` only if a non-trivial architectural choice surfaces while writing the audit; do not pre-resolve).
+- New OQs unless something genuinely new surfaces; OQ-031 already covers the PMA-cap deployment question.
+- Changes to `TASK_REGISTRY.md` (the plan-drafting session updates that file).
+
+### Frontmatter for `PHASE_2_READINESS.md`
+
+Mirror `PHASE_1_READINESS.md`:
+
+```markdown
+---
+id: PHASE_2_READINESS
+title: Phase 2 Readiness Audit
+status: DRAFT
+owner: shared
+last_reviewed: YYYY-MM-DD
+version: 0.1
+sources:
+  - docs/PHASE_1_READINESS.md
+  - docs/retros/M2-IB_retrospective.md
+  - TASK_REGISTRY.md
+  - CONTEXT_INVENTORY.md
+depends_on:
+  - RETRO-M2-IB
+  - PHASE_1_READINESS
+referenced_by: []
+---
 ```
-uv run python scripts/probe_tqqq_us_rth.py
-```
-
-US RTH is 13:30–20:00 UTC Mon–Fri while the US is in daylight saving (which 2026-05-04 is). Outside that window the probe warns and runs anyway, but the signal is less clean — IB may surface different reason text for pre/post-RTH submission.
-
-Read the printed terminal block. The probe self-classifies the outcome and prints a recommendation. Cross-reference the recommendation against the [decision tree](#todays-mission). Do NOT proceed past the Monday probe until the outcome is unambiguous.
-
-If the probe surfaces something ambiguous (e.g. REJECTED with a reason fragment that's unclear), capture the raw event.reason verbatim and surface to the operator.
-
-### 2.3 If Monday's probe was conclusive PRIIPs → Tuesday LSE RTH run
-
-```
-uv run python scripts/refresh_eodhd_signals.py     # safe; idempotent if already populated
-uv run python scripts/run_m2ib6_ib_paper.py        # default --max-bars 60 is fine
-```
-
-LSE RTH is 07:00–15:30 UTC Mon–Fri (08:00–16:30 BST during summer). Note 2026-05-04 is a UK Bank Holiday so Tuesday 2026-05-05 is the first available window post-substitution.
-
-Expected behaviour:
-
-- Per the eligibility frame, days alternate among `{QQL3 + IBTL}`, `{QQL3 + IBTM}`, `{QQL3 + IBTL + IBTM}` (always 2 active legs unless both filter out, then 100% IBTM safe-haven). Equal-weighted per-row.
-- Order-of-magnitude: with `--max-bars 60` (~3 months of replay), expect tens of submits across 2 instruments per day × N regime-flip days.
-- The FSM should now traverse SUBMITTED → ACCEPTED → FILLED for at least some submits — the previously-unexercised wire path for LSE.
-- `rejected == 0` (PRIIPs is gone with the substitution).
-- `breaches == 0` (risk engine clean).
-- Mixed-currency P&L: positions in QQL3 settle USD, IBTL / IBTM settle GBP. The `equity_curve` block reports a base-currency-converted total; surface if anything looks off.
-
-### 2.4 If Tuesday's run produced fills: flip ADR-048 + close M2-IB.6
-
-Single commit batch:
-
-1. ADR-048 status PROPOSED → ACCEPTED (`docs/decisions/DECISIONS.md` — body unchanged per append-only rule; flip the status field + add a PROPOSED→ACCEPTED date trail in the ADR header; bump the changelog with v0.18).
-2. **DD-7 §3 amendment**: split XLON into two rows by `asset_class` — `XLON + EQUITY → LSE` (direct), `XLON + ETF → SMART / primaryExchange=LSEETF`. Bump DD-7 frontmatter version + changelog.
-3. **INV-14**: add an annotation on error 200 documenting the LSE-ETF-against-bare-LSE empirical regression marker (one-line bullet in the existing 200 row's "Operator action" cell).
-4. **CONTEXT_INVENTORY** §10 priority queue: tick M2-IB.6.2 ✓; add M2-IB.6-close as the new front-of-queue.
-5. Commit, push, tag (`M2-IB.6.2-rth-validated`).
-
-Then write `docs/retros/M2-IB.6_retrospective.md` per [`docs/retros/_template.md`](docs/retros/_template.md). Capture:
-
-- Gate status: G3-IB exit criteria checklist for the multi-instrument case (connect, positions match TWS UI for 3 instruments, ≥ 5 fills across the 3 legs, throttle clean).
-- Delivered vs plan: M2-IB.{6-substrate, 6.1-resolver, 6.1-pipeline, 6.1-driver, 6.1-wire-PRIIPs, 6.2-resolver-LSEETF, 6.2-rth-validated} ladder with tags + dates.
-- Surprises: PRIIPs / KID hard block on UK retail (M2-IB.6.1 finding, formalised in ADR-047 + KB-9 §5.5); LSE main-book vs LSE-ETF distinct IB venues (M2-IB.6.2 probe, formalised in ADR-048); IBTL / IBTM exposed as GBP-hedged share classes only on LSEETF (mixed-currency P&L surprise).
-- ADRs raised in this milestone: ADR-043 (Phase 1 switch), ADR-044 (multi-instrument pipeline), ADR-045 (LongShortPortfolio dispatch), ADR-046 (US-equity SMART), ADR-047 (PRIIPs universe), ADR-048 (LSE-ETF SMART).
-- OQs raised: 0 new (all unknowns resolved by ADRs in-flight).
-- Substrate transitions: INV-1 row, INV-14 v0.4 → v0.5, KB-9 v0.1 → v0.2 (PRIIPs §5.5 added), DD-7 §3 amended (twice — XLON for Phase 1 use in v1.2, then split-by-asset_class in v1.3 at ADR-048 flip).
-
-Frozen on first write — do NOT edit thereafter.
-
-### 2.5 If Tuesday surprises (no fills despite RTH; new reject codes; FSM breakage): stop and surface
-
-Do not paper over surprises. The whole point of the RTH validation is to catch what the smoke can't. Capture, surface, do not invent workarounds.
-
-### 2.6 Phase-boundary handoff per CONTEXT_PROTOCOL §8.3.2
-
-If M2-IB.6 closes cleanly Tuesday, the next step is a Phase 2 readiness audit (separate session — **do NOT draft Phase 2 plan in this session**). Replace this `NEXT_PROMPT.md` with v0.8 targeting that audit.
 
 ---
 
-## Step 3 — Discipline reminders
+## Step 3 — At session end
 
-Same as the standing CLAUDE.md guidance:
-
-- Stable IDs in conversation, code comments, commit messages.
-- ADRs for architectural choices not already in `docs/decisions/DECISIONS.md`.
-- Append-only — no editing past ADR / OQ / RETRO bodies. ADR-048 status flip is a *header-field change*; the body stays untouched.
-- Status lifecycle: bump `last_reviewed` on every edit, `version` on substantive change.
-- Commit messages list every artefact touched by stable ID.
-- The Mon probe is **diagnostic, not architectural** — its result feeds the operator decision; it is not itself an ADR-bearing event.
+1. Commit `docs/PHASE_2_READINESS.md` with a clear commit message listing the dimensions evaluated and which questions the audit raised for the M3 plan-drafting session.
+2. Update `CONTEXT_INVENTORY.md` §10 priority queue: tick "Phase 2 readiness audit" ✓ done with link to `PHASE_2_READINESS.md`; add "M3 plan-drafting session" as the next-front-of-queue item.
+3. Update `CONTEXT_INVENTORY.md` status banner to reflect Phase 2 readiness audit complete.
+4. Replace this `NEXT_PROMPT.md` with v0.9 — **kickoff prompt for the M3 plan-drafting session**. That prompt should reference `PHASE_2_READINESS.md`'s open questions and ask the plan-drafting session to address them.
 
 ---
 
-## Step 4 — Hard constraints (out of scope)
+## Step 4 — Hard constraints (out of scope this session)
 
-- **Real-money trading.** M2-IB is paper only.
-- **Real-time multi-day daemon shape** (the canonical "≥ 5 trading days unattended" run from REQUIREMENTS §14). M5+ scope; not in this session.
-- **Phase 2 plan drafting.** Phase-boundary protocol forbids it (§8.3.2).
-- **Path B (IDTL / IDTM USD share classes) substitution.** Decided to defer per the operator's "Path A first, B after" — not in scope unless Monday's probe forces a re-think.
-- **Methodology paper revision.** Out of scope per Amendments_Log v0.3.
+- **M3 plan drafting.** Phase-boundary protocol forbids it (§8.3.2). The plan-drafting session comes after this audit.
+- **OQ-031 resolution.** Operator deferred to M3; the audit can flag it as a Phase-2-entry consideration but does not resolve it.
+- **Strategy / universe changes.** A3 stays as the Phase 1 deployment candidate; any restructuring lands in M3+ scope.
+- **Code changes of any kind.** This is a substrate-only audit session.
 
 ---
 
-## Step 5 — Handoff (at session end)
+## Step 5 — Discipline reminders
 
-Per CONTEXT_PROTOCOL §8.3 + §8.3.1 + §8.3.2, depending on outcome:
-
-**If Monday's probe was conclusive AND Tuesday's run produced fills:**
-
-1. ADR-048 PROPOSED → ACCEPTED + DD-7 §3 amendment + INV-14 annotation + CONTEXT_INVENTORY tick — single commit batch.
-2. RETRO-M2-IB.6 written + frontmatter + index-row in CONTEXT_INVENTORY §5.5.
-3. Tag `M2-IB.6.2-rth-validated` pushed.
-4. NEXT_PROMPT.md v0.8 drafted — focused on Phase 2 readiness audit (next session).
-5. G3-IB gate status reported as a checklist.
-
-**If Monday's probe was non-PRIIPs or surprising:**
-
-1. Stop. Capture observation. Do not commit Tuesday-conditional substrate.
-2. Surface to operator with the captured reason text + recommended next step (revert / amend / probe-deeper).
-3. Leave NEXT_PROMPT.md unchanged — the next session continues the diagnosis.
-
-**If Tuesday surprises with no fills despite RTH:**
-
-1. Same as above — do not commit ADR-048 ACCEPTED flip.
-2. Capture, surface, plan a follow-up wire test or substrate revision.
-
-In all cases: every artefact touched is committed; commit messages list artefacts by stable ID; uncommitted ADR-048 changes in the working tree must be either staged (on success) or stashed/reverted (on revisit) — never silently discarded.
+- Stable IDs in conversation, comments, commit messages.
+- No new ADRs unless a genuinely architectural choice surfaces (it shouldn't in a readiness audit).
+- The audit is a *snapshot* — it captures readiness as of this session's wall-clock. Future updates land as new versions, not edits to the existing body.
+- Append-only — no editing past ADR / OQ / RETRO bodies.
 
 ---
 
 ## A note on this prompt itself
 
-`NEXT_PROMPT.md` v0.7 (this) was authored at the M2-IB.6.2 wire-finding stop on 2026-05-03 (Sunday) for the Mon probe + Tue RTH window. The successor (v0.8 targeting Phase 2 readiness audit if M2-IB.6 closes; or vN targeting the diagnosis path if it doesn't) is a §8.3.2 deliverable at the close session.
+`NEXT_PROMPT.md` v0.8 (this) was authored at the M2-IB.6-close commit on 2026-05-06. The successor (v0.9 targeting the M3 plan-drafting session) is a §8.3.2 deliverable at this audit session's close.
 
 When in doubt about anything: re-read the protocol, ask, do not guess.
 

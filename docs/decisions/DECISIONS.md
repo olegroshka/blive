@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-05-03
-version: 0.16
+last_reviewed: 2026-05-06
+version: 0.19
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -75,6 +75,8 @@ referenced_by:
 | [ADR-045](#adr-045--longshortportfolio-btest-dispatch-extends-adr-030) | LongShortPortfolio btest dispatch (extends ADR-030) | ACCEPTED | 2026-05-02 | — |
 | [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) | IB resolver SMART routing for US equities (refines ADR-032) | ACCEPTED | 2026-05-02 | — |
 | [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) | PRIIPs-compliant universe for Phase 1 A3 strategy (refines ADR-043) | ACCEPTED | 2026-05-03 | — |
+| [ADR-048](#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) | LSE-ETF SMART routing discriminator (refines ADR-046) | ACCEPTED | 2026-05-03 | — |
+| [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) | `OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding | ACCEPTED | 2026-05-06 | — |
 
 ---
 
@@ -2207,6 +2209,146 @@ The Phase 1 A3 universe substitutes UK-listed PRIIPs-compliant analogues:
 
 ---
 
+## ADR-048 — LSE-ETF SMART routing discriminator (refines ADR-046)
+
+- **status:** ACCEPTED (PROPOSED 2026-05-03 → ACCEPTED 2026-05-06 at M2-IB.6 close after the Wed LSE-RTH wire run produced the first IB-paper FILL on the substituted universe)
+- **date:** 2026-05-03
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032)
+
+### Context
+
+[ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) codified SMART routing for US-equity venues (XNAS / XNYS / ARCX / BATS) and explicitly scoped non-US venues to direct routing per the [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) `_MIC_TO_IB_EXCHANGE` table. The XLON row was `XLON → "LSE"` (direct).
+
+[ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) substituted the Phase 1 universe to UK-listed UCITS / ETPs (`QQL3` / `IBTL` / `IBTM` on LSE). The 2026-05-03 M2-IB.6.2 wire run with those instruments and the existing `XLON → "LSE"` direct mapping returned **IB error 200 ("No security definition has been found")** on every order — the bare LSE main book does not expose UCITS ETPs.
+
+Direct probe via `reqContractDetails` against IB Paper found the actual venue:
+
+```
+Stock(symbol='QQL3', exchange='LSE',     currency='USD')  -> 0 results (error 200)
+Stock(symbol='QQL3', exchange='LSEETF',  currency='USD')  -> conId 566361457 ("3X US TECH 100")
+Contract(symbol='QQL3', exchange='SMART', primaryExchange='LSEETF', currency='USD')
+                                                          -> conId 566361457 (same)
+
+Stock(symbol='IBTL', exchange='LSE',     currency='USD')  -> 0 results (error 200)
+Stock(symbol='IBTL', exchange='LSE',     currency='GBP')  -> 0 results (error 200)
+Stock(symbol='IBTL', exchange='LSEETF',  currency='USD')  -> 0 results (no USD class)
+Contract(symbol='IBTL', exchange='SMART', primaryExchange='LSEETF', currency='GBP')
+                                                          -> conId 181150859 ("ISHARES USD TRES 20+yr"
+                                                              GBP-hedged accumulating share class)
+
+Contract(symbol='IBTM', exchange='SMART', primaryExchange='LSEETF', currency='GBP')
+                                                          -> conId 68489974  ("ISHARES USD TREASURY 7-10Y"
+                                                              GBP-hedged accumulating share class)
+```
+
+Two findings:
+
+1. **LSE main book and LSE ETF book are distinct IB venues.** UCITS / ETP listings live on `LSEETF`; main-book equities live on `LSE`. The existing `XLON → "LSE"` mapping is correct for cash equities but wrong for ETFs — they need `LSEETF` (or SMART with `primaryExchange="LSEETF"`).
+2. **GBP-hedged share-class divergence (related but separate from this ADR's scope):** the bare `IBTL` / `IBTM` symbols on LSEETF resolve to GBP-hedged accumulating share classes, not the USD distributing classes that ADR-047 implicitly assumed. QQL3 trades USD-denominated. Phase 1 P&L is therefore mixed-currency on the IB side (USD on QQL3, GBP on IBTL/IBTM). The hedge is designed to track USD-Treasury returns in GBP, so the strategy's directional signal is preserved; the M7 parity-envelope re-derivation absorbs the absolute-return divergence (already noted in ADR-047). This ADR scopes only the routing question; the share-class question is documented in `scripts/run_m2ib6_ib_paper.py` and may motivate a follow-up ADR if a pivot to USD share classes (`IDTL` / `IDTM`) is later preferred.
+
+The pattern of "the LSE ETF book needs SMART with primaryExchange=LSEETF" mirrors ADR-046's US-equity SMART pattern exactly — same shape, different venue.
+
+### Decision
+
+The production `IBInstrumentResolver` adds an LSE-ETF SMART discriminator alongside the existing US-SMART one:
+
+1. For `Instrument` records with `tradability="spot"` AND `venue="XLON"` AND `asset_class=ETF`, the resolver constructs `ib_async.Contract(secType="STK", symbol=..., currency=..., exchange="SMART", primaryExchange="LSEETF")`.
+2. For `Instrument` records with `tradability="spot"` AND `venue="XLON"` AND `asset_class=EQUITY` (single-name UK shares), the resolver retains direct routing per the existing `_MIC_TO_IB_EXCHANGE["XLON"] == "LSE"` mapping. Main-book equities and the ETF book are distinct venues; the discriminator is `asset_class`.
+3. Other venues (XPAR/SBF, XETR/IBIS, etc.) are unaffected — non-XLON, non-US-SMART venues retain direct routing per ADR-046's scoping.
+4. The new constant is named `_LSE_ETF_SMART_PRIMARY = "LSEETF"` (singleton string rather than a venue-set frozenset, since this is a one-venue rule rather than a pattern over a multi-venue set; if other European ETF books surface — e.g. XETR Xetra ETF — the constant generalises to a `_EU_ETF_PRIMARY_BY_VENUE` map).
+5. **DD-7 §3** is amended to reflect that XLON is split into two rows: `XLON + EQUITY → LSE` (direct), `XLON + ETF → SMART/primaryExchange=LSEETF`. Same shape as the ADR-046 US-equity rows.
+
+### Alternatives Considered
+
+1. **Introduce a separate `XLON_ETF` MIC pseudocode** (so `Instrument.venue="XLON_ETF"` triggers the LSEETF mapping). Rejected — `XLON` is the genuine MIC for the London Stock Exchange; inventing a non-MIC pseudocode pollutes the broker-neutral type with broker-specific routing knowledge per ADR-032 §"Alternatives" item 1 (the same reasoning that rejected `Instrument.routing_hint`). The discriminator stays in the resolver where broker-specific knowledge belongs.
+2. **Keep direct `LSEETF` routing** (set `Contract.exchange="LSEETF"` with empty `primaryExchange`). Rejected — works for the contract resolution, but trips IB Paper's "Direct Routed Orders" precaution at error 10311 (same precaution that motivated ADR-046's SMART move for US equities). The operator's M2-IB.4a Precautions bypass currently masks this, but bypass is operator-side state that drifts across IB Gateway restarts. SMART routing is IB best practice and avoids the bypass dependency for LSE ETFs the same way ADR-046 avoids it for US equities.
+3. **Always SMART for everything XLON** (drop the `asset_class` discriminator). Rejected — main-book LSE equities have their own SMART semantics for UK pre/post-trade transparency rules (LSE main book vs Cboe vs Aquis), and the resolver should preserve existing direct-routed equity tests until those venues need SMART. Conservative scoping: ETF-only for now; widen if equity SMART becomes desirable.
+4. **Discriminate on currency** (e.g. "if USD on XLON, route to LSEETF"). Rejected — currency cleanly correlates with main-book vs ETF book in the Phase 1 universe (GBP main-book, USD/GBP ETFs), but in the general case GBP-denominated UCITS exist (IBTL/IBTM ARE GBP-hedged on LSEETF) — currency is not a reliable discriminator. `asset_class` is correct.
+
+### Consequences
+
+- **Positive:** Phase 1 A3 (QQL3 / IBTL / IBTM on LSE) routes via SMART → contracts resolve cleanly (10/10 reach PreSubmitted in the M2-IB.6.2 wire smoke), no precaution dance, no operator-side bypass dependency for LSE-ETF orders. Future LSE-ETF strategies (any A1 / A2 / A3 instance trading UK-listed UCITS) inherit the convention.
+- **Positive:** Routing convention now reads consistently: US-equity SMART (ADR-046) and LSE-ETF SMART (this ADR) follow the same `(venue, asset_class) → exchange/primary` shape. Adding future European ETF venues (XETR, XAMS) is a one-line addition to the discriminator.
+- **Negative:** DD-7 §3 grows complexity — XLON is no longer a single row; it's split by `asset_class`. The table grows roughly 2× columns to express the (venue, asset_class) → (exchange, primaryExchange) mapping fully. Acceptable cost; the discriminator is real.
+- **Risk:** SMART routing is opaque about which actual ECN the order routes to (same risk as ADR-046). The realised execution venue is in `Fill.execution.exchange` at fill time. Discipline accepts this trade-off.
+- **Follow-ups:**
+  - **Validate at LSE RTH on Tue 2026-05-05 07:00–15:30 UTC** — the M2-IB.6.2 smoke run reached PreSubmitted but cancelled at the engine's 10s timeout because LSE was closed (Sun 2026-05-03; Mon 2026-05-04 is UK May Day Bank Holiday). Real fills only land during RTH.
+  - DD-7 §3 amended to split XLON into two rows by `asset_class`. Lands in same commit as this ADR's flip to ACCEPTED.
+  - Existing `tests/unit/adapters/ib/test_instrument_resolver.py::test_to_contract_strips_dot_l_suffix_on_xlon` (XLON + EQUITY) stays — it asserts `exchange == "LSE"` for the equity case. Add companion tests: `test_to_contract_xlon_etf_routes_via_smart_lseetf` (XLON + ETF → exchange="SMART", primaryExchange="LSEETF"), `test_to_contract_xlon_etf_currency_passthrough` (currency="USD" and currency="GBP" both pass through).
+  - The GBP-hedged share-class question (IBTL/IBTM on LSEETF resolve to GBP-hedged accumulating classes only) is **out of scope of this ADR** — documented inline in `scripts/run_m2ib6_ib_paper.py`. If Path B (USD distributing share classes `IDTL` / `IDTM`) is later picked over the GBP-hedged versions, that's a Phase 1 universe revision, not a routing-discriminator change; ADR-047 amends, this ADR stays load-bearing.
+  - INV-14 grows: error 200 row gains an annotation that LSE ETF requests against the bare `"LSE"` exchange surface as code 200 (in addition to the M2-IB.3a `CAC.PA` Yahoo-suffix variant) — empirical regression marker.
+
+### Cross-References
+
+- [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) — SMART routing pattern this extends; the discriminator shape (venue/asset_class → exchange/primaryExchange) is identical.
+- [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — Phase 1 universe that exposes this finding; the GBP-hedged share-class question is documented there + in driver script comments.
+- [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) — overarching resolution policy; this is a compatibility refinement.
+- [DD-7 §3](../dd/instrument_dictionary.md#3-venue-mic--ib-exchange) — table amended in same commit when this flips to ACCEPTED.
+- [INV-14](../inv/ib_error_codes.md) — error 200 catalogue; gains annotation for the LSE-ETF-against-bare-LSE variant.
+- M2-IB.6.2 wire-probe finding (2026-05-03) — empirical observation that motivated this ADR; `reqContractDetails` probe output captured in commit `c34267d` body.
+
+---
+
+## ADR-049 — `OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding
+
+- **status:** ACCEPTED (PROPOSED → ACCEPTED same-day 2026-05-06 at M2-IB.6 close per established same-day-ACCEPTED pattern; the empirical investigation matrix already provided the validation that an out-of-session ACCEPTED flip would normally need)
+- **date:** 2026-05-06
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) (order-construction policy), companion to [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) / [ADR-048](#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) (IB execution-routing trail)
+
+### Context
+
+The 2026-05-06 LSE-RTH validation runs of `scripts/run_m2ib6_ib_paper.py` against the ADR-047 PRIIPs-compliant universe surfaced **IB warning 2161** — a regulatory **disruptive-orders price cap** (Price Management Algo / PMA) that IB applies to volatile / leveraged products on certain venues for retail-account broker-of-record protection. Observed on **QQL3** (3× Nasdaq ETP on LSEETF, median 3.91% / max 11.74% daily range over the last 60 bars) but not on IBTM (1× UCITS Treasury ETF, median 0.52% range).
+
+The cap binds the effective limit price to IB's live bid/ask reference (`mktCapPrice` ≈ best bid for BUY orders), regardless of the order's nominal limit. In a rising market, BUY orders capped at the bid don't fill — the order sits in `Submitted` state at a sub-cap LMT until the engine cancels on timeout.
+
+IB's 2161 warning text recommends *"submit an algorithmic Market Order (IBALGO)"* as the workaround, suggesting that algorithmic routing bypasses the cap. To validate this hypothesis (and provide useful infrastructure for non-cap-bound venues / future strategies regardless), this ADR adds `OrderType.ADAPTIVE_MKT` — a new variant of the existing `OrderType` enum that maps to `ib_async.MarketOrder` with `algoStrategy="Adaptive"` and `algoParams=[("adaptivePriority","Normal")]` set on the wire-going order.
+
+The variant landed and was wire-validated at M2-IB.6.2c on 2026-05-06: ib_async correctly carries the algo metadata; the FSM trace differs (now PendingSubmit → PreSubmitted → Submitted → ValidationError → PendingCancel → Cancelled). **However, the 2161 cap still binds** — `mktCapPrice=39.4` was set on the Adaptive order identically to the raw-MKT case, and 0/5 QQL3 placeOrders filled in the run 3 smoke. A follow-up single-shot LMT probe (`scripts/probe_qql3_lmt_cap.py`, LMT @ $50 well above IB's ~$39 reference) confirmed the cap binds on **LMT** too — IB literally cap-rounded the $50 LMT to $39.4 per the warning text.
+
+### Decision
+
+Two parts:
+
+1. **`OrderType.ADAPTIVE_MKT` is a permanent addition to the `OrderType` StrEnum** in `blive.domain.types`. The `IBBroker._blive_to_ib_order` helper builds `ib_async.MarketOrder(...)` and sets `algoStrategy="Adaptive"`, `algoParams=[ib_async.TagValue("adaptivePriority","Normal")]`. Strategies opt in per-instrument by setting the order type at sizer / pipeline level — not a global default. The pipeline (`run_ib_multi_pipeline`) accepts an `order_type_by_symbol: Mapping[str, OrderType] | None` override to wire per-leg routing. Other adapters (paper, mock, and any future broker without an equivalent algo) raise `NotImplementedError` on submit per the registry contract.
+
+2. **PMA-cap (warning 2161) is empirically a structural constraint of UK retail accounts on LSEETF leveraged products.** No operator-side toolkit available in code bypasses it: MKT, ADAPTIVE_MKT, and LMT are all subject to the cap; the `priceManagementOff` order flag is institutional-only. Bypass requires either MiFID II Professional Client classification (declined per ADR-047 alt #2) or substituting non-leveraged products. Captured in OQ-031 for pre-Phase-1-cutover resolution. INV-14 v0.7 documents the catalogued surface + the empirical-validation matrix across the four runs.
+
+### Alternatives Considered
+
+1. **Hardcode IBALGO Adaptive for all `OrderType.MKT` orders in `IBBroker._blive_to_ib_order`** (no new enum). Rejected — Adaptive is genuinely a different execution semantic from raw MKT (smart agency routing vs immediate-or-cancel-against-NBBO; per-priority cost and latency profiles vary), and forcing it implicitly hides that from strategy authors. The enum makes the choice explicit.
+2. **Add an `algo_strategy: str | None` field on `Order`** instead of an enum variant. Rejected — `OrderType` already encodes the broker-side routing intent (MKT vs LMT vs STP), and Adaptive is conceptually a routing intent. Adding a parallel `algo_strategy` field bloats the type with broker-specific knowledge per ADR-027 / ADR-032 §"Alternatives Considered" (the same reasoning that rejected `Instrument.routing_hint`). Future algo variants (TWAP, VWAP, DARKICE) would similarly land as `OrderType.{TWAP,VWAP,DARKICE}` — keeping the algo distinction in the enum keeps the type small per algo and forces explicit opt-in.
+3. **Defer the enum addition until a non-cap-bound use case demonstrates value.** Rejected — the wire-validation is already done (51st broker test passes); rolling the work back would be churn for no gain; and Adaptive is empirically useful infrastructure for fill-quality on non-cap-bound venues (US equities, IBTM/IBTL where the cap doesn't trigger) even if it doesn't solve the QQL3 PMA case.
+4. **Pursue Professional Client classification to enable `priceManagementOff`.** Out of scope per ADR-047 alt #2 — requires meeting MiFID II "elective professional" criteria (wealth, experience, transaction frequency thresholds); operator declined at M2-IB.6.1.
+5. **Substitute non-leveraged products on the affected leg of the strategy** (i.e. drop QQL3, restructure A3 around 1× equity exposure). Out of scope at this milestone — the 3× → 1× substitution on the bond leg per ADR-047 already shifts the strategy regime materially; further restructuring on the equity leg is a strategy-design decision belonging to its own ADR. Captured in OQ-031 as one of the candidate resolutions.
+
+### Consequences
+
+- **Positive:** `OrderType.ADAPTIVE_MKT` is a clean addition to the order-construction surface that future strategies can opt into. The implementation surface (broker branch + pipeline wiring + driver per-symbol override) is small and parallel to existing patterns; the FSM contract is unchanged.
+- **Positive:** The 2161 PMA-cap is now empirically catalogued (INV-14 v0.7) with the full validation matrix across four wire runs. Future investigations of similar regulatory price-cap warnings (other codes in the 2xxx range; other venues) inherit the diagnostic methodology — single-shot LMT probe at known-above-reference price, inspect `trade.orderStatus.mktCapPrice`.
+- **Negative:** Phase 1 deployment of A3 has a real-world fill-quality constraint on the QQL3 leg. The strategy's effective execution profile is regime-dependent (fills on flat/down moves, blocked on up moves). Backtest fill assumptions (immediate execution at close) do not carry forward; M7 parity envelope must absorb this divergence.
+- **Risk — strategy-quality on QQL3 is structurally regime-biased:** in extended uptrends the strategy spends time long the equity leg without acquiring full position, then is forced to acquire on regime-flips into safe-haven (when ask drops to bid). This is opposite to the intended trend-following profile. RC-04 daily-loss thresholds (M4 work) become more important; the operator may decide to prefer Path B (IDTL/IDTM USD distributing share-class substitution, possibly with a non-leveraged equity leg) to avoid the cap entirely.
+- **Risk — IB's 2161 warning text is empirically misleading.** The recommendation *"submit an algorithmic Market Order (IBALGO)"* does not bypass the cap on UK retail accounts. Documenting this in INV-14 v0.7 protects future investigations from re-running the same hypothesis.
+- **Follow-ups:**
+  - OQ-031 ("Phase 1 deployment under PMA-bound retail account — accept regime-dependent fills, pursue Pro Client, or substitute the leveraged equity leg?") — target resolution: pre-Phase-1-go-live.
+  - M2-IB.6 retro should capture this as a **milestone-defining surprise** alongside the PRIIPs / KID block (M2-IB.6.1) and the LSEETF venue-split (M2-IB.6.2).
+  - Address the EODHD-vs-IB QQL3 price 10× discrepancy at M7 parity work — either subscribe to IB live market data for sizing reference, or document the EODHD unit-of-quote convention so the strategy can convert.
+  - Status PROPOSED until M2-IB.6 retro decision; flips to ACCEPTED in the same close-out commit batch as ADR-048.
+
+### Cross-References
+
+- [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) — order-construction policy this extends.
+- [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) — SMART routing for US equities; the IB-execution-routing trail this ADR continues.
+- [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — Phase 1 universe substitution; QQL3 is the leveraged leg that surfaces the 2161 cap.
+- [ADR-048 PROPOSED](#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) — LSE-ETF SMART routing discriminator (companion; both flip ACCEPTED at M2-IB.6 close).
+- [INV-14 v0.7](../inv/ib_error_codes.md) — error 201 / 2161 catalogue with empirical validation matrix.
+- [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — Phase 1 deployment trade-off (accept / Pro Client / substitute).
+- M2-IB.6.2b/c wire-finding (2026-05-06) — four-run investigation captured in INV-14 v0.7 changelog.
+- `scripts/probe_qql3_lmt_cap.py` — single-shot LMT-bound diagnostic.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2225,3 +2367,6 @@ The Phase 1 A3 universe substitutes UK-listed PRIIPs-compliant analogues:
 - **v0.14 (2026-05-02)** — Phase 1 strategy switch. Added ADR-043 (Phase 1 strategy switch: `triple_lev_sma_filter_dsl` (A3) replaces `tkan_v4_momentum_timing` (A2)) — drafted PROPOSED then ACCEPTED same-session. Phase 1 strategy is now A3 (TQQQ / TMF / IEF, daily rebalance, T+1 open). ADR-021 (CAC ETF proxy) status flipped ACCEPTED → SUPERSEDED-BY-ADR-043; the CAC.PA Instrument + Yahoo-suffix translation per ADR-041 + DD-7 §3 / §3.1 substrate stay durable (CAC.PA is wire-validated end-to-end at `M2-IB.4a-happy-cacpa` and may revive as a future strategy / comparison instrument). NAV slice unchanged at 5–10% per ADR-020. A2 (`tkan_v4_momentum_timing`) — code stays in repo, marked DEFERRED-NO-TARGET in INV-1 / KB-5. Companion ADRs (044 multi-instrument pipeline, 045 LongShortPortfolio dispatch, 046 IB SMART for US equities) follow in the next commit. Substrate updates in this batch: KB-5 §7 phased priority reordered, INV-1 A2/A3 phase columns swapped, TASK_REGISTRY M2-IB.5 closed at architectural surface + M2-IB.6 scope opened with sub-milestones .6.1 / .6.2 / .6-close, CONTEXT_INVENTORY §10 / status banner updated.
 - **v0.15 (2026-05-02)** — M2-IB.6-substrate batch 2/2: companion ADRs to ADR-043. Added ADR-044 (multi-instrument pipeline support — `instruments: list[Instrument]` + `target_weights_series: pd.DataFrame`; ships at M2-IB.6.1), ADR-045 (LongShortPortfolio btest dispatch — extends ADR-030's per-archetype pattern; lights up `compute_target_weights_for_date()` for A3 / A1 / A1a), ADR-046 (IB resolver SMART routing for US equities — codifies the probe-local `_SmartUsResolver` workaround into the production `IBInstrumentResolver`; XNAS / XNYS / ARCX / BATS spot equities now route via `exchange="SMART"` + `primaryExchange` hint; refines ADR-032). All three drafted PROPOSED then ACCEPTED same-session. DD-7 §3 amended in same commit (US ETF venues gain a `primaryExchange` column; SMART convention documented). M2-IB.6-substrate complete; .6.1 (code) opens next.
 - **v0.16 (2026-05-03)** — PRIIPs-compliant universe for Phase 1. Added ADR-047 (PRIIPs-compliant universe for Phase 1 A3 strategy — refines ADR-043). The 2026-05-03 M2-IB.6.1 architectural-surface wire run surfaced IB error 201 with PRIIPs-KID reason on every order against the US-domiciled TQQQ / TMF / IEF tickers — UK retail accounts cannot trade products without UK-filed Key Information Documents. ADR-047 substitutes UK-listed PRIIPs-compliant analogues: QQL3 (LSE, 3× Nasdaq 100 ETP), IBTL (LSE, iShares $ Treasury Bond 20+yr UCITS — **1× not 3×**, no UK-listed 3× US-Treasury exists), IBTM (LSE, iShares $ Treasury Bond 7-10yr UCITS). Trend signals (QQQ / TLT) unchanged — signal-only, not traded. Strategy regime shifts from 3×/3× to 3×/1× across the legs; backtest numbers don't carry forward exactly. Pipeline / FSM / SMART routing all validated correctly in the wire run; the blocker is regulatory, not technical. Companion edits in same commit batch: INV-14 (error 201 PRIIPs-KID variant catalogued alongside the precaution-cascade variant), KB-9 (new §"PRIIPs / KID restrictions" section), DD-7 §3 (XLON row "Used by" annotation updated for Phase 1 use), INV-1 (Phase 1 row universe column updated), refresh_eodhd_signals.py + run_m2ib6_ib_paper.py code updates for the new tickers.
+- **v0.19 (2026-05-06 / M2-IB.6 close)** — Two ADRs flipped PROPOSED → ACCEPTED in the M2-IB.6 close batch: ADR-048 (LSE-ETF SMART routing discriminator — refines ADR-046; held PROPOSED since 2026-05-03 awaiting LSE-RTH fill validation) and ADR-049 (`OrderType.ADAPTIVE_MKT` + empirical PMA-cap finding — refines ADR-027, companion to ADR-046/048). Both bodies unchanged (append-only); status fields and PROPOSED→ACCEPTED date trails added in the ADR headers. Companion edits in same close commit batch: DD-7 §3 amended (XLON row split into XLON+EQUITY → direct LSE and XLON+ETF → SMART/primaryExchange=LSEETF, mirroring ADR-046's US-SMART pattern shape); CONTEXT_INVENTORY M2-IB.6 row ✓ marked complete with M2-IB.6.2c sub-milestone ledger; TASK_REGISTRY M2-IB.6 milestone closed with the actual sub-milestone path (M2-IB.6-substrate / .6.1 / .6.2a-PRIIPs-probe / .6.2b-LSE-RTH / .6.2c-PMA-cap-investigation / .6-close); RETRO-M2-IB written + frozen; NEXT_PROMPT.md replaced v0.7 → v0.8 targeting Phase 2 readiness audit per [CONTEXT_PROTOCOL §8.3.2](../../CONTEXT_PROTOCOL.md). All ADRs accepted as of v0.19: ADR-001..049 ACCEPTED. The M2-IB.6.2c PMA-cap investigation (4-run wire matrix; ADAPTIVE_MKT does not bypass the cap on UK retail accounts) is captured in [INV-14 v0.7](../inv/ib_error_codes.md) and [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account); operator decided at close to address OQ-031 in M3 rather than block M2-IB.6 on it.
+- **v0.18 (2026-05-06)** — Added ADR-049 (`OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding — refines ADR-027, companion to ADR-046 / ADR-048) **PROPOSED**. The M2-IB.6.2b/c LSE-RTH validation runs on 2026-05-06 surfaced IB warning **2161** (Price Management Algo / regulatory disruptive-orders cap) on QQL3 (3× Nasdaq leveraged ETP on LSEETF), preventing fills despite the order reaching ACCEPTED state — IB caps the effective limit price to the live bid/ask reference, and BUY orders capped at the bid don't fill in rising markets. ADR-049 adds `OrderType.ADAPTIVE_MKT` (IB IBALGO Adaptive variant of MKT) per IB's recommended workaround in the warning text — wire-validated as correctly-routed (algoStrategy='Adaptive' + algoParams set on the ib_async order; FSM trace differs) — but **empirically confirmed across four progressive wire runs that the 2161 cap binds structurally on UK retail accounts regardless of order type**: raw MKT (10s + 60s waits), ADAPTIVE_MKT, and LMT @ $50 (well above IB's ~$39 reference) all see `mktCapPrice` set and zero fills on QQL3. The `priceManagementOff` order flag (institutional-only opt-out) is unavailable to retail. Bypass requires either MiFID II Professional Client classification (declined per ADR-047 alt #2) or non-leveraged-product substitution. Documented as INV-14 v0.7 (catalogued + validation-matrix); raises OQ-031 ("Phase 1 deployment under PMA-bound retail") for pre-cutover resolution. `OrderType.ADAPTIVE_MKT` infrastructure stays — useful tooling for non-cap-bound venues / future strategies — captured in `src/blive/domain/types.py`, `src/blive/adapters/ib/broker.py`, `src/blive/runtime/ib_pipeline.py` (per-symbol order_type override), `scripts/run_m2ib6_ib_paper.py` (QQL3 → ADAPTIVE_MKT mapping), `tests/unit/adapters/ib/test_broker.py` (test_submit_adaptive_mkt_order_routes_via_ibalgo). Side-finding (not promoted into a separate ADR; flagged as M7 parity concern): EODHD reports QQL3 close ~$383 while IB reference is ~$39 — a 10× discrepancy, likely a recent reverse-split or EODHD unit-of-quote convention; the strategy's sizing/limit-pricing uses EODHD's price → 10× too high → IB rejects with error 110 (price out of allowed range) before 2161 even fires when LMTs are computed from EODHD close × multiplier.
+- **v0.17 (2026-05-03)** — Added ADR-048 (LSE-ETF SMART routing discriminator — refines ADR-046) **PROPOSED**. The M2-IB.6.2 wire run with the ADR-047 universe returned IB error 200 on every order: bare `XLON → "LSE"` direct routing does not expose UCITS / ETP listings (the LSE main book and LSE ETF book are distinct IB venues — LSEETF). Direct probe via `reqContractDetails` confirmed all three Phase 1 tradables resolve cleanly via `Contract(exchange="SMART", primaryExchange="LSEETF")`. ADR-048 codifies the discriminator: `XLON + ETF → SMART/LSEETF`, `XLON + EQUITY → LSE` (direct, unchanged). Mirrors the ADR-046 US-equity SMART pattern shape. Status PROPOSED until the LSE RTH wake-up on Tue 2026-05-05 produces actual fills (M2-IB.6.2 smoke reached PreSubmitted / cancelled at engine timeout — LSE was closed Sun + UK May Day Bank Holiday Mon). Code change already landed in `c34267d`; substrate ADR-048 + DD-7 §3 follow-up land in this commit. **Side-finding documented inline (out of ADR-048 scope):** IBTL/IBTM on LSEETF resolve to GBP-hedged accumulating share classes (IB doesn't expose USD distributing classes for these symbols); QQL3 trades USD-denominated. Phase 1 P&L is mixed-currency (USD on QQL3, GBP-hedged on IBTL/IBTM). Documented in `scripts/run_m2ib6_ib_paper.py`; pivot to `IDTL` / `IDTM` USD distributing share classes (Path B) is a separate Phase 1 universe revision, not a routing-discriminator change.
