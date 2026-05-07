@@ -90,11 +90,13 @@ class RiskBreachSeverity(StrEnum):
 class RiskCheckCode(StrEnum):
     """Stable identifiers matching INV-4 row labels.
 
-    Values are M1 subset; widens at M4 with the rest of the RC set.
+    Values are the implemented subset (M1 + M3.1); widens at M4 with the
+    rest of the RC set.
     """
 
     RC_08 = "RC-08"  # stale data
     RC_09 = "RC-09"  # market hours
+    RC_10 = "RC-10"  # reference price sanity (M3.1; ADR-050)
     RC_12 = "RC-12"  # model-artefact freshness
     RC_13 = "RC-13"  # kill-switch armed
 

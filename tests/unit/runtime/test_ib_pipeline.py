@@ -696,3 +696,102 @@ def test_run_ib_multi_pipeline_equity_curve_includes_all_instruments(
     # All 3 instruments have mark prices (even IEF which has no held position).
     assert set(final.mark_prices.keys()) == {"TQQQ", "TMF", "IEF"}
     assert all(p > Decimal("0") for p in final.mark_prices.values())
+
+
+# --- M3.1 / ADR-050 — EODHD-vs-IB conversion at the pipeline boundary -------
+
+
+def _qql3_instrument() -> Instrument:
+    """QQL3 on LSEETF per ADR-047 / ADR-048. The catalogue entry per
+    ADR-050 is the load-bearing test fixture: divisor 10 against IB
+    live reference."""
+    return Instrument(
+        symbol="QQL3",
+        venue="XLON",
+        currency="USD",
+        asset_class=AssetClass.ETF,
+        multiplier=Decimal("1"),
+        tradability="spot",
+    )
+
+
+@pytest.fixture
+def qql3_only_market_data(tmp_path: Path) -> tuple[PaperMarketData, list[Instrument]]:
+    """20-day QQL3-only fixture; close price ~$400 (raw EODHD scale,
+    reflecting the M3.1 split-lag scenario). The convention catalogue
+    converts to ~$40 IB-equivalent."""
+    base = datetime(2026, 1, 5, 15, 30, tzinfo=timezone.utc)
+    rows = []
+    for i in range(20):
+        t = base + timedelta(days=i)
+        close = 400.0 + i * 1.0
+        rows.append(
+            dict(
+                open_time_utc=t - timedelta(hours=8),
+                close_time_utc=t,
+                open=close - 0.5,
+                high=close + 1.0,
+                low=close - 1.0,
+                close=close,
+                volume=1000.0,
+            )
+        )
+    p = tmp_path / "QQL3_20d.parquet"
+    pd.DataFrame(rows).to_parquet(p)
+    inst = _qql3_instrument()
+    md = PaperMarketData(fixtures={inst: p})
+    return md, [inst]
+
+
+def test_run_ib_multi_pipeline_qql3_uses_converted_price_for_sizing_and_marks(
+    qql3_only_market_data: tuple[PaperMarketData, list[Instrument]],
+) -> None:
+    """The M3.1 happy path — QQL3 in the catalogue (divisor 10):
+
+    - Sizer sees the converted price ~$40 not raw $400, so position
+      sizes are 10× larger than the no-conversion case (correct
+      IB-USD-equivalent exposure).
+    - Equity-curve mark_prices reflect the converted scale.
+    - No RC-10 BLOCK fires on the strategy's MKT orders (MKT is a
+      no-op for RC-10 by design)."""
+    market_data, instruments = qql3_only_market_data
+    broker = _FakeIBBroker()
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = market_data.bars(instruments[0])
+    weights = pd.DataFrame(
+        {"QQL3": [1.0] * len(bars)},
+        index=pd.to_datetime([b.close_time_utc for b in bars], utc=True),
+    )
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=market_data,
+            instruments=instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+        )
+    )
+
+    # Mark price is the IB-equivalent (raw EODHD / 10), not raw EODHD.
+    final = result.equity_curve[-1]
+    final_mark = final.mark_prices["QQL3"]
+    # Last bar raw close = 400 + 19 = 419; converted = 41.9
+    assert Decimal("40") <= final_mark <= Decimal("45")
+
+    # Sizer at NAV slice 0.05 with $100k starting cash and target_weight=1.0
+    # against a ~$40 converted price gives ~125 shares (5000 / 40),
+    # versus only ~12 if using the raw $400 price. The first rebalance
+    # is the diagnostic.
+    first = result.equity_curve[0]
+    first_qty = first.positions.get("QQL3", Decimal("0"))
+    # Expect a non-trivial position size that's plausible at the
+    # converted scale (>50 shares; raw EODHD would give <15).
+    assert first_qty > Decimal("50"), (
+        f"expected >50 QQL3 shares from converted-price sizing, got {first_qty} "
+        f"(would be ~12 if conversion were missing)"
+    )
+
+    # No RC-10 BLOCK on MKT orders; conversion handled at sizing time.
+    assert all(b.check.value != "RC-10" for b in result.breaches)

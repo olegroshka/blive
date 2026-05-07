@@ -20,11 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
 from blive.domain.events import RiskBreach, RiskBreachSeverity, RiskCheckCode
-from blive.domain.types import Bar, Instrument, Order
+from blive.domain.types import Bar, Instrument, Order, OrderType
 
 # --- Topic name (INV-5 row `risk.breach`) -----------------------------------
 
@@ -85,6 +86,18 @@ class RiskEngineConfig:
     # Whether the strategy currently rebalances on intraday or EOD bars; set
     # at strategy load time from the btest ``DataConfig.frequency``.
     is_intraday: bool = False
+    # RC-10 (price sanity) per INV-4 v0.2 + ADR-050. Default ±50% — wider
+    # than INV-4 v0.1's ±20% because leveraged ETPs (e.g. QQL3) hit
+    # 11.74% max daily range per INV-14 v0.7; ±20% would false-positive
+    # on legitimate gap-overnight moves. Catches LMT-construction bugs
+    # (offset misconfig, sign error) and computed-price drift that would
+    # otherwise hit IB error 110 ("price not in allowed range"). The
+    # catalogue-miss case (e.g. QQL3 absent from the EODHD convention
+    # catalogue per ADR-050) is the catalogue's own job to detect —
+    # operator-curated entries with a documented confirmation source.
+    # M7 forward-list: per-instrument bands once the M3.2 window
+    # characterises volatility profiles.
+    max_price_deviation_pct: Decimal = Decimal("0.5")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +107,11 @@ class RiskInputs:
     last_bar: Bar | None  # most recent bar for the relevant instrument; None ⇒ no data
     is_market_open: bool  # provided by the engine's calendar (M1: caller wires this in)
     artefact_paths: Mapping[str, Path] = field(default_factory=dict)
+    # RC-10 reference price (per ADR-050). The IB-equivalent reference
+    # used for sizing. None ⇒ no reference available; RC-10 is skipped.
+    # Pipeline wires this from the EODHD-converted bar close per
+    # `blive.adapters.eodhd.eodhd_to_ib_price`.
+    reference_price: Decimal | None = None
 
 
 # --- The engine ---------------------------------------------------------------
@@ -184,6 +202,12 @@ class RiskEngine:
             breaches.append(artefact_block)
             return None, breaches
 
+        # RC-10 — reference-price sanity (ADR-050)
+        price_breach = self._check_price_sanity(order, inputs.reference_price, now)
+        if price_breach is not None:
+            breaches.append(price_breach)
+            return None, breaches
+
         return order, breaches
 
     # --- internals ----------------------------------------------------------
@@ -216,6 +240,57 @@ class RiskEngine:
                 detail=(
                     f"bar for {instrument.symbol} is stale: {int(delta.total_seconds())}s "
                     f"old > threshold {threshold_sec}s"
+                ),
+                time_utc=now,
+            )
+        return None
+
+    def _check_price_sanity(
+        self,
+        order: Order,
+        reference_price: Decimal | None,
+        now: datetime,
+    ) -> RiskBreach | None:
+        """RC-10 — reference price sanity (per ADR-050 / INV-4 v0.2).
+
+        Compares the order's effective price (limit price for LMT/STP_LMT;
+        otherwise the reference itself, which makes the check a no-op for
+        MKT/ADAPTIVE_MKT). Trips if the deviation exceeds
+        ``max_price_deviation_pct``.
+
+        Skipped when ``reference_price`` is None — defensive default for
+        callers that haven't yet wired in the IB-equivalent reference.
+        """
+        if reference_price is None:
+            return None
+        if reference_price <= 0:
+            # Defensive: a non-positive reference is nonsensical; treat
+            # as "no reference" rather than trip on every order.
+            return None
+
+        # MKT-style orders have no price to sanity-check; the conversion
+        # at sizing time is the only check that matters for them.
+        if order.order_type in (OrderType.MKT, OrderType.ADAPTIVE_MKT):
+            return None
+
+        order_price = order.limit_price
+        if order_price is None:
+            return None
+
+        deviation = abs(order_price - reference_price) / reference_price
+        if deviation > self._config.max_price_deviation_pct:
+            return RiskBreach(
+                strategy_id=self._strategy_id,
+                check=RiskCheckCode.RC_10,
+                severity=RiskBreachSeverity.BLOCK,
+                detail=(
+                    f"price sanity: order price {order_price} for "
+                    f"{order.instrument.symbol} deviates "
+                    f"{float(deviation) * 100:.1f}% from reference "
+                    f"{reference_price} (threshold "
+                    f"{float(self._config.max_price_deviation_pct) * 100:.1f}%); "
+                    f"check EODHD convention catalogue / catalogue staleness "
+                    f"(ADR-050)"
                 ),
                 time_utc=now,
             )

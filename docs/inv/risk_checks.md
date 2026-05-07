@@ -3,8 +3,8 @@ id: INV-4
 title: Risk Checks Inventory
 status: DRAFT
 owner: Claude
-last_reviewed: 2026-04-26
-version: 0.1
+last_reviewed: 2026-05-06
+version: 0.2
 sources:
   - REQUIREMENTS.md §5.5
   - btest/src/quantdsl_backtest/dsl/backtest_config.py  # accessed 2026-04-26
@@ -12,9 +12,12 @@ depends_on:
   - KB-1 btest_dsl_inventory §9 (RiskChecks, DrawdownPolicy)
   - KB-3 ib_pacing_spec §1, §9 (rate-limit defaults)
   - KB-6 cost_margin_dictionary §6, §7 (RiskChecks, DrawdownPolicy)
+  - KB-15 parity_methodology §"Unit-of-quote" (RC-10 cross-link)
+  - ADR-050 (EODHD-vs-IB unit-of-quote conversion at sizing time)
 referenced_by:
   - REQUIREMENTS.md §5.5
   - ADR-008 (RiskEngine no-bypass)
+  - ADR-050 (RC-10 implementation surface)
 ---
 
 # INV-4 — Risk Checks Inventory
@@ -48,7 +51,7 @@ Out of scope: post-trade reconciliation drift detection (REQUIREMENTS §5.7); ki
 | RC-07 | Position concentration | single-name notional ≤ 8% of strategy NAV | block | `risk.max_single_name_notional_pct` | tighter than RC-03 since net-of-leverage |
 | RC-08 | Stale data | refuse if last bar > 5 min old (intraday) or > 1 day (EOD) | block | `risk.max_data_staleness_intraday_sec`, `..._daily_sec` | per-strategy frequency-aware (KB-5 §4 commitment) |
 | RC-09 | Market hours | refuse if not RTH unless explicitly enabled | block | `execution.live_overrides.outside_rth` | per-strategy |
-| RC-10 | Reference price sanity | refuse if limit price > ±20% from last trade | block | `risk.max_price_deviation_pct` | defence against fat-finger / stale signal |
+| RC-10 | Reference price sanity | refuse if limit/stop price deviates > ±50% from IB-equivalent reference | block | `risk.max_price_deviation_pct` | M3.1 implemented per [ADR-050](../decisions/DECISIONS.md#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only); reference is the EODHD bar close converted via [`blive.adapters.eodhd.eodhd_to_ib_price`](../../src/blive/adapters/eodhd/conventions.py); MKT/ADAPTIVE_MKT skip; threshold widened from v0.1's ±20% because leveraged ETPs (e.g. QQL3) hit 11.74% max daily range per INV-14 v0.7 |
 | RC-11 | Drawdown scaling | applies `DrawdownPolicy.mode` per [KB-6 §7](../kb/cost_margin_dictionary.md#7-drawdownpolicy) | scale | `risk.drawdown_policy.*` | reduces target weights before order proposal; not strictly a risk check but governs the same flow |
 | RC-12 | Stale model artefact | refuse if A2/A3 ML artefact older than freshness window | block (warn at 21d) | `risk.max_model_artefact_age_days` | default **30 days hard, 21 days warning** per [ADR-022](../decisions/DECISIONS.md#adr-022--tkan-artefact-freshness-window-30d-hard-21d-warning); per-strategy override allowed |
 | RC-13 | Kill-switch armed | refuse all new submissions when armed | block | n/a (system) | system-wide; cancels open orders, holds positions until human resume |
@@ -78,3 +81,4 @@ Default order: RC-13 (kill-switch armed) → RC-08 (stale data) → RC-09 (marke
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap from REQUIREMENTS §5.5.
+- **v0.2 (2026-05-06 / M3.1)** — RC-10 promoted from DRAFT-only to implemented per [ADR-050](../decisions/DECISIONS.md#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only). Threshold widened from ±20% to ±50%: the original ±20% would false-positive on legitimate gap-overnight moves on leveraged ETPs (QQL3 hit 11.74% max daily range per [INV-14 v0.7](./ib_error_codes.md)). Reference price source: the EODHD bar close converted via [`blive.adapters.eodhd.eodhd_to_ib_price`](../../src/blive/adapters/eodhd/conventions.py) — `RiskInputs.reference_price` is the IB-equivalent value. MKT / ADAPTIVE_MKT orders skip RC-10 (no price to sanity-check; the conversion at sizing time is the only relevant check for them). Catalogue-miss detection (a symbol absent from the EODHD convention catalogue) is the catalogue's own job — operator-curated entries with a documented confirmation source. M7 forward-list per [KB-15](../kb/parity_methodology.md): per-instrument bands once the M3.2 window characterises volatility profiles. Implementation: `src/blive/risk/checks.py` (RC-10 branch ordered after RC-12, before any future RC-05/RC-06 rate limits per §"Order of evaluation"); `RiskCheckCode.RC_10` added to `blive.domain.events`; tests at `tests/unit/risk/test_checks.py` (8 RC-10 tests including the canonical M3.1 case `test_rc10_lmt_far_above_reference_blocks` — EODHD-derived LMT $415 vs IB ref $39 → BLOCK).

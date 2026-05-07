@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-05-06
-version: 0.19
+version: 0.20
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -77,6 +77,7 @@ referenced_by:
 | [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) | PRIIPs-compliant universe for Phase 1 A3 strategy (refines ADR-043) | ACCEPTED | 2026-05-03 | — |
 | [ADR-048](#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) | LSE-ETF SMART routing discriminator (refines ADR-046) | ACCEPTED | 2026-05-03 | — |
 | [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) | `OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding | ACCEPTED | 2026-05-06 | — |
+| [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) | EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only) | PROPOSED | 2026-05-06 | — |
 
 ---
 
@@ -2349,6 +2350,96 @@ Two parts:
 
 ---
 
+## ADR-050 — EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only)
+
+- **status:** PROPOSED (drafted 2026-05-06 at M3.1 entry; flips to ACCEPTED on first wire exercise of `scripts/run_m2ib6_ib_paper.py` against the converted price for QQL3 producing the IB-USD-equivalent quantity within ±1% and no IB error 110, per the established M2-IB PROPOSED-uncommitted-in-working-tree pattern)
+- **date:** 2026-05-06
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-014](#adr-014--data-sources-via-clean-api-abstraction) (data-source abstraction), [ADR-017](#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing) (hybrid EODHD+IB routing per-instrument), [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) (Sizer policy)
+- **companion:** [INV-4 v0.2](../inv/risk_checks.md) (RC-10 promoted to implemented), [KB-15 stub-DRAFT v0.1](../kb/parity_methodology.md) (unit-of-quote / reverse-split section)
+
+### Context
+
+M2-IB.6.2c surfaced a side-finding (per [RETRO-M2-IB §"Surprises" #7](../retros/M2-IB_retrospective.md), [INV-14 v0.7](../inv/ib_error_codes.md) changelog): **EODHD reports QQL3 close ~$383 while IB live reference is ~$39 — a ~10× discrepancy.** Strategy sizing using EODHD's price under-sizes positions ~10× in actual IB-dollar terms; LMTs computed from EODHD close × multiplier produce IB error 110 ("price not in allowed range") *before* warning 2161 (PMA cap) fires. This contaminates the M3.2 empirical paper-mode window — under-sized positions don't generate the cap-binding behaviour the [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) decision rests on. Hence the M3.1 narrow fix lands first (per [TASK_REGISTRY M3.1](../../TASK_REGISTRY.md)).
+
+The 2026-05-06 EODHD-side investigation (`scripts/probe_qql3_unit_of_quote.py`) gathered a four-hypothesis refutation matrix:
+
+| # | Hypothesis | Status |
+|---|---|---|
+| H1 | EODHD `close` is unadjusted; `adjusted_close` carries the split factor | **REFUTED.** EODHD's `adjusted_close` equals `close` (ratio 1.0) across the entire 30-day window — EODHD considers its data already adjusted, but the latest close ($412.94 on 2026-05-06) is still ~10.6× IB's reference. The `/api/splits/QQQ3.LSE` endpoint returns only one historical event (2020-11-09); nothing recent. |
+| H2 | EODHD reports LSE main-book GBp pence, IB reports USD on LSEETF | **REFUTED.** EODHD's `/api/fundamentals.General.CurrencyCode = "USD"` for `QQQ3.LSE`. Both quote in USD. |
+| H3+H4 | Different share class / vendor-symbol divergence | **INCONCLUSIVE without operator-side IB ISIN cross-check.** EODHD fundamentals returned no ISIN for `QQQ3.LSE` (the bare ETP entry); IB conId 566361457 is operator-confirmed at the M2-IB.6.1 wire probe. M3.1 does not require resolving this — the manual-scale-factor catalogue entry below is correct regardless of whether the divergence is split-lag or share-class. |
+
+**Empirical conclusion:** the most likely cause is a recent reverse-split that **IB has reflected but EODHD has not yet propagated** to its EOD feed. This is a known EODHD lag failure mode on volatile / leveraged ETPs (issuers commonly do 10:1 reverse-splits on 3× products after drawdowns; vendor splits-history feeds sometimes lag by days to weeks). The exact root cause does not need to be resolved at M3.1 — the M3.1 narrow fix is *operator-confirmed scale factor against IB live reference*, captured in a per-instrument convention catalogue. When EODHD propagates the missing split, `adjusted_close` will diverge from `close` and the catalogue entry can simplify.
+
+The Phase 2 readiness audit ([PHASE_2_READINESS.md](../PHASE_2_READINESS.md)) and the M3.1 NEXT_PROMPT.md surface two implementation routes:
+
+- **Route A — IB live market data subscription for sizing reference.** Sizer takes the live IB reference price instead of EODHD close. Authoritative; eliminates the unit-of-quote question entirely; sets up M7 parity diagnostics. Cons: monthly subscription cost (LSEETF tier per [KB-2](../kb/ib_capability_matrix.md)); operator-tariff-dependent.
+- **Route B — EODHD-convention conversion at sizing time.** Per-instrument convention catalogue (split-adjustment, currency conversion, manual scale factor) applied at sizing-time. Pros: zero subscription cost; immediate fix; reversible. Cons: per-instrument convention may differ; reverse-split events require manual catalogue updates.
+- **Hybrid — B now, A later.** Route B as M3.1's narrow fix; Route A as the M7 / live-cutover-time eventual replacement.
+
+### Decision
+
+**Hybrid: B-now, A-later, with A bounded to free IB market-data tiers only.**
+
+Five concrete commitments:
+
+1. **B-now: per-instrument convention catalogue** at `src/blive/adapters/eodhd/conventions.py` (the first non-script EODHD module; precursor to the eventual `EODHDDataSource` per [ADR-014](#adr-014--data-sources-via-clean-api-abstraction)). The catalogue is a module-level dict literal mapping IB symbol → `Convention` dataclass. Conventions supported at v0.1: `IDENTITY` (no conversion; default for unlisted symbols) and `MANUAL_SCALE` (`divisor: Decimal`, `source: str`, `notes: str`). Future conventions land here when M3.2's window or future ETP refreshes surface them.
+
+2. **A-later, free-MD-only.** When the M7 parity-diagnostic surface is built, the Route A live-IB-MD reference path is **bounded to instruments that resolve via free IB market-data tiers** (no LSEETF or other paid subscription). This is an explicit, accepted limitation: instruments outside the free tier stay on B indefinitely. Rationale: operator-stated cost discipline at M3.1 entry (no monthly LSEETF subscription); the resulting blast radius is "Route A handles the easy cases (US-equity SMART feeds), Route B handles the hard cases (LSE-ETF / leveraged ETPs)" rather than full A coverage. Captured here so a future M7 implementor doesn't re-litigate scope.
+
+3. **Sizing-time conversion, not data-time.** The `PaperMarketData` parquet stays unchanged — it's the EODHD raw record per [ADR-029](#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet). Conversion lives at the pipeline boundary (the `_price_lookup` closure in `run_ib_multi_pipeline`) so the parquet remains a clean vendor-pristine record and the Sizer continues to receive a single `Decimal` price per `Instrument`. This preserves the [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) Sizer purity contract.
+
+4. **RC-10 (price sanity) lands as the code-side capture** of the M3.1 fix per [INV-4 v0.2](../inv/risk_checks.md). Default threshold ±50% (not the v0.1 ±20%); the wider band is calibrated for leveraged ETPs whose maximum daily range hits 11.74% (per INV-14 v0.7 QQL3 observation) — ±20% would false-positive on legitimate gap-overnight moves. RC-10 catches catalogue-miss / convention-error / reference-price-stale cases at sizing time before IB error 110 surfaces.
+
+5. **PROPOSED → ACCEPTED on first wire exercise.** Per the M2-IB pattern (ADR-031, ADR-032, ADR-048, ADR-049), this ADR stays PROPOSED in the working tree until `scripts/run_m2ib6_ib_paper.py --max-bars 5` against IB Paper produces a QQL3 sized within ±1% of the IB-USD-equivalent target exposure with no IB error 110. The flip to ACCEPTED is a header-only edit (date trail in status field) in the wire-validation commit; body stays append-only.
+
+### Alternatives Considered
+
+1. **Pure Route A — subscribe to IB live MD for the full universe at M3.1.** Rejected — operator declined the subscription cost at M3.1 entry; pulling A forward to M3.1 would add a multi-day Operator + IB-Paper-tariff configuration loop unrelated to the unit-of-quote question. A as M7 work matches the original NEXT_PROMPT v1.0 framing and the M3.1 narrow scope.
+2. **Hardcode QQL3 = ÷10 directly in the pipeline `_price_lookup` closure.** Rejected — premature crystallisation; pollutes the pipeline with broker-specific knowledge of one instrument; doesn't generalise when M3.2's window surfaces a second instrument with a different convention. The per-instrument catalogue at `blive.adapters.eodhd.conventions` is the same effective code at one extra indirection that scales gracefully.
+3. **YAML-driven catalogue under `~/.blive/config/` (paralleling the [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) secrets pattern).** Rejected at M3.1 — premature plumbing for a single-entry catalogue. Forward-noted in [TASK_REGISTRY Sketched M4+](../../TASK_REGISTRY.md) (the "vendor-convention catalogue centralisation" line) for promotion when the catalogue grows ≥3-5 entries or operator-side editing pressure justifies the YAML loader.
+4. **Apply the conversion inside `refresh_eodhd_signals.py`** (write the IB-equivalent price to the parquet directly). Rejected — corrupts the vendor-pristine record; hides the convention from any other consumer of the parquet (notebooks, parity-diagnostic re-runs at M7); makes catalogue updates require a parquet refresh. Sizing-time conversion keeps the catalogue close to the consuming code path.
+5. **Detect splits automatically by comparing latest EODHD close to a moving-average baseline.** Rejected — fragile (legitimate gap-overnight on volatile ETPs would false-trigger); operator-confirmed catalogue entries are simpler and auditable. RC-10 (price sanity) is the auto-detection layer for catalogue-miss cases; the catalogue itself is operator-curated.
+6. **Use `Instrument.multiplier` to encode the conversion.** Rejected — `multiplier` is the contract-side multiplier (e.g. options 100×; futures contract size) per [DD-1](../dd/domain_objects.md). Overloading it with vendor-side unit conversion confuses two distinct semantics (broker-side vs vendor-side scaling) and breaks the broker-neutral `Instrument` shape.
+
+### Consequences
+
+- **Positive:** M3.1 fix lands as a small, contained surface — one new module (`blive.adapters.eodhd.conventions`), one new RiskEngine check (RC-10), one closure-level conversion at the `run_ib_multi_pipeline` boundary. Sizer purity preserved; PaperMarketData parquet unchanged. Catalogue scales to N instruments without further plumbing.
+- **Positive:** RC-10 implementation is the code-side capture of the discrepancy — future similar discrepancies (any EODHD-vs-IB unit-of-quote drift on a new ticker; any catalogue entry that becomes stale) trip RC-10 at sizing time before IB error 110 surfaces. Diagnostic surface is operator-friendly (`RiskBreach` event with the discrepancy magnitude in the detail field).
+- **Positive:** The M3.2 empirical paper-mode window now generates correctly-sized positions on QQL3, restoring the cap-binding behaviour the OQ-031 decision rests on. M3.2 readiness is unblocked.
+- **Negative:** The convention catalogue is operator-curated. When the issuer does another reverse-split or EODHD updates its splits feed, the catalogue entry must be revised manually. This is an accepted maintenance burden for the M3.1 → M7 window. Forward-noted: when the operator notices RC-10 firing on a previously-conformant instrument, that's the signal to revise the catalogue.
+- **Negative / risk — convention drift goes undetected if RC-10 is misconfigured.** The ±50% threshold is wide enough that a small (~5%) convention-drift wouldn't trigger it. Mitigation: catalogue entries carry a `notes: str` field where the operator records the date-of-confirmation against IB live reference; revisit cadence at each M-close per [CONTEXT_PROTOCOL §6.3](../../CONTEXT_PROTOCOL.md) review-cadence rules. Forward-list for M7: tighten RC-10 to per-instrument bands (e.g. QQL3 ±15% based on its volatility profile, IBTL ±5%) once the M3.2 window provides empirical volatility characterisation.
+- **Risk — A-later free-MD-only constraint may force B as the *permanent* solution for QQL3-class instruments.** Accepted at M3.1 entry. The trade-off is documented; operator may revisit at M7 if the LSEETF subscription becomes affordable or if the strategy regime shifts toward instruments on free tiers.
+- **Follow-ups:**
+  - Wire exercise: `scripts/run_m2ib6_ib_paper.py --max-bars 5` during LSE RTH; QQL3 sized within ±1% of IB-USD-equivalent; no IB error 110. Flip ADR-050 PROPOSED → ACCEPTED in the wire-validation commit.
+  - Catalogue v0.1 entry for QQL3: `MANUAL_SCALE(divisor=10.0, source="IB live reference, M2-IB.6.2c", notes="EODHD-side recent reverse-split lag; revisit when /api/splits/QQQ3.LSE picks up the event")`.
+  - INV-4 v0.1 → v0.2 (RC-10 row promoted to implemented; threshold ±20% → ±50%).
+  - INV-14 grows: error 110 row promoted from forward-list to catalogue with the EODHD-driven LMT-out-of-range observation as the canonical example.
+  - KB-15 (`parity_methodology`) MISSING → DRAFT v0.1 (unit-of-quote / reverse-split section only; full M7 parity envelope defers to M7).
+  - DD-7 footnote on the QQL3 reverse-split convention (cross-link to KB-15 + this ADR).
+  - TASK_REGISTRY Sketched M4+ gains a forward-note: "vendor-convention catalogue centralisation — promote `blive.adapters.eodhd.conventions` dict-literal to YAML if the surface grows ≥3-5 entries or operator-side editing pressure builds".
+  - M7 parity work picks up the A-later piece **bounded to free-MD instruments only**; this ADR is load-bearing for the bounded scope.
+
+### Cross-References
+
+- [ADR-014](#adr-014--data-sources-via-clean-api-abstraction) — EODHD data-source abstraction; this ADR adds the first concrete vendor-side convention layer.
+- [ADR-017](#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing) — hybrid EODHD+IB routing per-instrument; the Hybrid B-now / A-later split here aligns with the per-instrument routing principle ADR-017 codifies.
+- [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) — Sizer purity; this ADR preserves it (conversion at the pipeline boundary, not in the Sizer).
+- [ADR-029](#adr-029--papermarketdata-as-marketdataport-adapter-fixture-backed-parquet) — PaperMarketData parquet contract; preserved (parquet remains vendor-pristine).
+- [ADR-035](#adr-035--secrets-handling-discipline-blivesecrets) — secrets pattern; the M4+ YAML-catalogue forward-note parallels this pattern.
+- [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — PRIIPs-compliant universe; QQL3 is the leveraged leg that surfaces the discrepancy.
+- [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) — PMA-cap empirical finding; the EODHD-vs-IB discrepancy was first documented as a side-finding inline in ADR-049's `Side-finding` block.
+- [INV-4](../inv/risk_checks.md) — RC-10 row promoted to implemented at v0.2.
+- [INV-14](../inv/ib_error_codes.md) — error 110 promoted from forward-list to catalogue.
+- [KB-15](../kb/parity_methodology.md) — stub-DRAFT v0.1 captures the unit-of-quote section.
+- [DD-7](../dd/instrument_dictionary.md) — footnote on the QQL3 reverse-split convention.
+- [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — Phase 1 deployment trade-off; M3.1 unblocks the M3.2 evidence collection that grounds OQ-031 resolution.
+- [PHASE_2_READINESS.md](../PHASE_2_READINESS.md) — Phase 2 entry audit; surfaced the EODHD-vs-IB question as a Phase 1 deployment-decision dependency.
+- `scripts/probe_qql3_unit_of_quote.py` — EODHD-side investigation probe.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2370,3 +2461,4 @@ Two parts:
 - **v0.19 (2026-05-06 / M2-IB.6 close)** — Two ADRs flipped PROPOSED → ACCEPTED in the M2-IB.6 close batch: ADR-048 (LSE-ETF SMART routing discriminator — refines ADR-046; held PROPOSED since 2026-05-03 awaiting LSE-RTH fill validation) and ADR-049 (`OrderType.ADAPTIVE_MKT` + empirical PMA-cap finding — refines ADR-027, companion to ADR-046/048). Both bodies unchanged (append-only); status fields and PROPOSED→ACCEPTED date trails added in the ADR headers. Companion edits in same close commit batch: DD-7 §3 amended (XLON row split into XLON+EQUITY → direct LSE and XLON+ETF → SMART/primaryExchange=LSEETF, mirroring ADR-046's US-SMART pattern shape); CONTEXT_INVENTORY M2-IB.6 row ✓ marked complete with M2-IB.6.2c sub-milestone ledger; TASK_REGISTRY M2-IB.6 milestone closed with the actual sub-milestone path (M2-IB.6-substrate / .6.1 / .6.2a-PRIIPs-probe / .6.2b-LSE-RTH / .6.2c-PMA-cap-investigation / .6-close); RETRO-M2-IB written + frozen; NEXT_PROMPT.md replaced v0.7 → v0.8 targeting Phase 2 readiness audit per [CONTEXT_PROTOCOL §8.3.2](../../CONTEXT_PROTOCOL.md). All ADRs accepted as of v0.19: ADR-001..049 ACCEPTED. The M2-IB.6.2c PMA-cap investigation (4-run wire matrix; ADAPTIVE_MKT does not bypass the cap on UK retail accounts) is captured in [INV-14 v0.7](../inv/ib_error_codes.md) and [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account); operator decided at close to address OQ-031 in M3 rather than block M2-IB.6 on it.
 - **v0.18 (2026-05-06)** — Added ADR-049 (`OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding — refines ADR-027, companion to ADR-046 / ADR-048) **PROPOSED**. The M2-IB.6.2b/c LSE-RTH validation runs on 2026-05-06 surfaced IB warning **2161** (Price Management Algo / regulatory disruptive-orders cap) on QQL3 (3× Nasdaq leveraged ETP on LSEETF), preventing fills despite the order reaching ACCEPTED state — IB caps the effective limit price to the live bid/ask reference, and BUY orders capped at the bid don't fill in rising markets. ADR-049 adds `OrderType.ADAPTIVE_MKT` (IB IBALGO Adaptive variant of MKT) per IB's recommended workaround in the warning text — wire-validated as correctly-routed (algoStrategy='Adaptive' + algoParams set on the ib_async order; FSM trace differs) — but **empirically confirmed across four progressive wire runs that the 2161 cap binds structurally on UK retail accounts regardless of order type**: raw MKT (10s + 60s waits), ADAPTIVE_MKT, and LMT @ $50 (well above IB's ~$39 reference) all see `mktCapPrice` set and zero fills on QQL3. The `priceManagementOff` order flag (institutional-only opt-out) is unavailable to retail. Bypass requires either MiFID II Professional Client classification (declined per ADR-047 alt #2) or non-leveraged-product substitution. Documented as INV-14 v0.7 (catalogued + validation-matrix); raises OQ-031 ("Phase 1 deployment under PMA-bound retail") for pre-cutover resolution. `OrderType.ADAPTIVE_MKT` infrastructure stays — useful tooling for non-cap-bound venues / future strategies — captured in `src/blive/domain/types.py`, `src/blive/adapters/ib/broker.py`, `src/blive/runtime/ib_pipeline.py` (per-symbol order_type override), `scripts/run_m2ib6_ib_paper.py` (QQL3 → ADAPTIVE_MKT mapping), `tests/unit/adapters/ib/test_broker.py` (test_submit_adaptive_mkt_order_routes_via_ibalgo). Side-finding (not promoted into a separate ADR; flagged as M7 parity concern): EODHD reports QQL3 close ~$383 while IB reference is ~$39 — a 10× discrepancy, likely a recent reverse-split or EODHD unit-of-quote convention; the strategy's sizing/limit-pricing uses EODHD's price → 10× too high → IB rejects with error 110 (price out of allowed range) before 2161 even fires when LMTs are computed from EODHD close × multiplier.
 - **v0.17 (2026-05-03)** — Added ADR-048 (LSE-ETF SMART routing discriminator — refines ADR-046) **PROPOSED**. The M2-IB.6.2 wire run with the ADR-047 universe returned IB error 200 on every order: bare `XLON → "LSE"` direct routing does not expose UCITS / ETP listings (the LSE main book and LSE ETF book are distinct IB venues — LSEETF). Direct probe via `reqContractDetails` confirmed all three Phase 1 tradables resolve cleanly via `Contract(exchange="SMART", primaryExchange="LSEETF")`. ADR-048 codifies the discriminator: `XLON + ETF → SMART/LSEETF`, `XLON + EQUITY → LSE` (direct, unchanged). Mirrors the ADR-046 US-equity SMART pattern shape. Status PROPOSED until the LSE RTH wake-up on Tue 2026-05-05 produces actual fills (M2-IB.6.2 smoke reached PreSubmitted / cancelled at engine timeout — LSE was closed Sun + UK May Day Bank Holiday Mon). Code change already landed in `c34267d`; substrate ADR-048 + DD-7 §3 follow-up land in this commit. **Side-finding documented inline (out of ADR-048 scope):** IBTL/IBTM on LSEETF resolve to GBP-hedged accumulating share classes (IB doesn't expose USD distributing classes for these symbols); QQL3 trades USD-denominated. Phase 1 P&L is mixed-currency (USD on QQL3, GBP-hedged on IBTL/IBTM). Documented in `scripts/run_m2ib6_ib_paper.py`; pivot to `IDTL` / `IDTM` USD distributing share classes (Path B) is a separate Phase 1 universe revision, not a routing-discriminator change.
+- **v0.20 (2026-05-06 / M3.1 entry)** — Added ADR-050 (EODHD-vs-IB unit-of-quote conversion at sizing time — Hybrid B-now / A-later free-MD-only) **PROPOSED**. Operationalises the M3.1 narrow-scope sizing fix per [TASK_REGISTRY M3.1](../../TASK_REGISTRY.md): Route B (per-instrument convention catalogue at `src/blive/adapters/eodhd/conventions.py`) ships now; Route A (live-IB-MD reference for sizing) reserved for M7 but **bounded to free IB market-data tiers only** (operator-stated cost discipline; LSEETF and other paid subscriptions out of scope indefinitely). The 2026-05-06 EODHD-side investigation (`scripts/probe_qql3_unit_of_quote.py`) refuted the `adjusted_close` and currency-convention hypotheses; the operative cause is a recent reverse-split that EODHD has not yet propagated. Catalogue v0.1 entry for QQL3: `MANUAL_SCALE(divisor=10.0, source="IB live reference, M2-IB.6.2c")`. Companion edits in same M3.1 commit batch: RC-10 (price sanity, ±50% threshold) implemented in `blive.risk` per [INV-4 v0.2](../inv/risk_checks.md); KB-15 (`parity_methodology`) MISSING → DRAFT v0.1 (unit-of-quote / reverse-split section only); INV-14 grows the error 110 row promotion; DD-7 footnote on the QQL3 reverse-split convention; pipeline `_price_lookup` closure routes through the conventions catalogue. Status PROPOSED until the M3.1 wire-validation run produces a QQL3 sized within ±1% of the IB-USD-equivalent target exposure with no IB error 110; flips to ACCEPTED in the wire-validation commit per the established same-day-ACCEPTED pattern.

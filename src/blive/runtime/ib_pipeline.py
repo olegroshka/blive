@@ -52,6 +52,7 @@ from uuid import uuid4
 import pandas as pd
 
 from blive.adapters.alert.log import LogAlert
+from blive.adapters.eodhd.conventions import eodhd_to_ib_price
 from blive.adapters.ib.broker import IBBroker
 from blive.adapters.paper.market_data import PaperMarketData
 from blive.domain.events import OrderEvent
@@ -443,14 +444,29 @@ async def run_ib_multi_pipeline(
         ) -> Instrument:
             return _by[symbol]
 
+        # Per ADR-050 (M3.1 narrow-scope sizing fix), EODHD prices are
+        # converted to their IB-equivalent via the per-instrument
+        # convention catalogue at sizing time. The PaperMarketData
+        # parquet stays vendor-pristine; conversion is at the pipeline
+        # boundary so the Sizer continues to receive a single Decimal
+        # price per Instrument (preserves ADR-027 Sizer purity).
+        # Symbols absent from the catalogue use IDENTITY (no conversion).
         def _price_lookup(
             inst: Instrument,
             _bars: dict[str, Bar] = bars_by_symbol,
         ) -> Decimal:
-            return _bars[inst.symbol].close
+            return eodhd_to_ib_price(
+                ib_symbol=inst.symbol,
+                eodhd_price=_bars[inst.symbol].close,
+            )
 
         # Compute mark-to-market equity for the Sizer's NAV-slice math.
-        mark_prices: dict[str, Decimal] = {sym: bar.close for sym, bar in bars_by_symbol.items()}
+        # Same per-symbol conversion applies — equity must be in
+        # IB-equivalent terms so the NAV slice represents real exposure.
+        mark_prices: dict[str, Decimal] = {
+            sym: eodhd_to_ib_price(ib_symbol=sym, eodhd_price=bar.close)
+            for sym, bar in bars_by_symbol.items()
+        }
         equity = _compute_equity_multi(cash, positions, mark_prices)
 
         sizer_in = SizerInput(
@@ -466,10 +482,15 @@ async def run_ib_multi_pipeline(
         candidate_orders = size_orders(sizer_in)
 
         for desired in candidate_orders:
+            # IB-equivalent reference for RC-10 (price sanity, ADR-050) —
+            # mark_prices was already converted via the EODHD convention
+            # catalogue; reuse rather than re-convert.
+            ref_price = mark_prices.get(desired.instrument.symbol)
             risk_inputs = RiskInputs(
                 last_bar=bars_by_symbol[desired.instrument.symbol],
                 is_market_open=True,  # paper-test runs against historical bars
                 artefact_paths=dict(live_strategy.live_config.artefact_paths.paths),
+                reference_price=ref_price,
             )
             approved, breaches = risk_engine.approve(desired, inputs=risk_inputs, now=t)
             if breaches:
@@ -595,11 +616,18 @@ def _ib_order_from_desired(
     """Build the order to send to IB.
 
     For MARKET, return ``desired`` with ``order_type=MKT`` and no price.
-    For LIMIT, set the limit at the bar's close ± an aggressive offset
-    (BUY: close * (1 + bps/10000); SELL: close * (1 - bps/10000)) so
-    crossing orders are likely to fill in normal venue conditions while
-    away-of-market ones exercise the SUBMITTED → ACCEPTED → CANCELED
-    path on the engine's bar-end cancel.
+    For LIMIT, set the limit at the IB-equivalent bar close ± an
+    aggressive offset (BUY: ref * (1 + bps/10000); SELL: ref * (1 -
+    bps/10000)) so crossing orders are likely to fill in normal venue
+    conditions while away-of-market ones exercise the SUBMITTED →
+    ACCEPTED → CANCELED path on the engine's bar-end cancel.
+
+    The reference is the EODHD bar close converted via
+    :func:`blive.adapters.eodhd.conventions.eodhd_to_ib_price` per
+    [ADR-050](../../../../docs/decisions/DECISIONS.md#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) —
+    without the conversion the QQL3 LMT lands at ~10× IB's allowed
+    range and trips IB error 110 ("price not in allowed range") before
+    warning 2161 (PMA cap) fires.
     """
     base = desired
     if order_type in (OrderType.MKT, OrderType.ADAPTIVE_MKT):
@@ -619,10 +647,14 @@ def _ib_order_from_desired(
         )
     if order_type == OrderType.LMT:
         scale = limit_price_offset_bps / Decimal("10000")
+        ib_reference = eodhd_to_ib_price(
+            ib_symbol=base.instrument.symbol,
+            eodhd_price=bar.close,
+        )
         if base.side == OrderSide.BUY:
-            limit_price = bar.close * (Decimal("1") + scale)
+            limit_price = ib_reference * (Decimal("1") + scale)
         else:
-            limit_price = bar.close * (Decimal("1") - scale)
+            limit_price = ib_reference * (Decimal("1") - scale)
         return Order(
             client_order_id=ClientOrderId(uuid4()),
             strategy_id=base.strategy_id,
