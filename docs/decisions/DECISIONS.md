@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-06-05
-version: 0.22
+version: 0.23
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -79,6 +79,7 @@ referenced_by:
 | [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) | `OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding | ACCEPTED | 2026-05-06 | — |
 | [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) | EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only) | ACCEPTED | 2026-05-06 | — |
 | [ADR-051](#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time) | Normalize IB order prices to the contract tick grid at submit time | ACCEPTED | 2026-06-05 | — |
+| [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) | Phase 1 accepts the PMA-bound leveraged-leg non-fill (OQ-031 Option 1) | ACCEPTED | 2026-06-05 | OQ-031 |
 
 ---
 
@@ -1913,6 +1914,7 @@ Adopt **session-bootstrap files** as the canonical L0 implementation under the a
 - **decider:** Oleg (with Claude)
 - **supersedes:** [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — CAC ETF proxy as the Phase 1 strategy designation. The CAC.PA Instrument + Yahoo-suffix substrate per ADR-041 + DD-7 stay durable.
 - **amends:** [KB-5 §7 phased priority](../kb/strategy_taxonomy.md#7-nav-slice--priorities) — A3 promoted to Phase 1; A2 (`tkan_v4_momentum_timing`) demoted to deferred-no-target.
+- **refined-by:** [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) — Phase 1 accepts that the QQL3 (3×) leveraged equity leg structurally does not fill on the PMA-bound UK-retail account ([OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) Option 1). The QQL3 leg is **retained but provisional**; the leveraged-equity redesign is deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
 
 ### Context
 
@@ -2145,6 +2147,7 @@ The production `IBInstrumentResolver` routes US-equity venues via SMART:
 - **date:** 2026-05-03
 - **decider:** Oleg (with Claude)
 - **refines:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)
+- **refined-by:** [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) — the PRIIPs-substituted QQL3 (3×) leg structurally does not fill on the PMA-bound UK-retail account ([OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) Option 1); **retained but provisional** for Phase 1, leveraged-equity redesign deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
 
 ### Context
 
@@ -2506,6 +2509,74 @@ Generalising: the minimum price increment is (a) **per-contract**, (b) sometimes
 
 ---
 
+## ADR-052 — Phase 1 accepts the PMA-bound leveraged-leg non-fill (OQ-031 Option 1)
+
+- **status:** ACCEPTED (drafted 2026-06-05 at M3.3 PROPOSED; flipped ACCEPTED same-session on operator confirm — resolves [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on the M3.2 empirical capture)
+- **date:** 2026-06-05
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) (Phase 1 deployment under PMA-bound retail account)
+- **refines:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) (Phase 1 A3 strategy), [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) (PRIIPs universe) — the QQL3 leveraged leg is retained for Phase 1 but flagged *provisional* (both carry a `refined-by: ADR-052` backref); the leveraged-equity redesign is deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
+- **companion:** [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) (the empirical PMA-cap finding this operationalises), [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) (margin-financed leverage — basis for OQ-032's leverage-preserving path), [INV-14 v0.9](../inv/ib_error_codes.md) (warning 2161 + error-110 rows)
+
+### Context
+
+[OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) asked which of four deployment-mode options Phase 1 commits to for live cutover (G4), given M2-IB.6.2c's finding that IB warning 2161 (Price Management Algo / regulatory disruptive-orders cap) binds structurally on QQL3 (3× Nasdaq leveraged ETP on LSEETF) for the operator's UK-retail IB-Paper account. M3 sequenced this *inform-then-resolve* ([TASK_REGISTRY](../../TASK_REGISTRY.md) plan-call #1): M3.2 captures the fill profile; M3.3 (this ADR) resolves on the data.
+
+**The M3.2 evidence** (`~/.blive/data/m3_2_window/runs.jsonl`, two flip-spanning LSE-RTH replay captures 2026-06-05, on now-correctly-sized ([ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only)) and on-grid ([ADR-051](#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time)) orders — **zero error 110, zero rejects, zero breaches**):
+
+| Run | window | regime flips | QQL3 sub/fill | IBTM sub/fill | 2161 cap-binding |
+|-----|--------|--------------|---------------|---------------|------------------|
+| 1   | `--max-bars 40` | 2 | 25 / **0** | 3 / **3** | 0 |
+| 2   | `--max-bars 60` | 2 | 44 / **0** | 3 / **3** | 0 |
+| agg | — | 4 | **69 / 0 (0%)** | **6 / 6 (100%)** | **0** |
+
+Every QQL3 order reached ACCEPTED then CANCELED on engine-timeout (`observed_error_codes` = `{202: N}`, IB cancel confirmations); every IBTM order reached ACCEPTED then FILLED. **The 3× leveraged equity leg does not fill; the 1× Treasury leg fills cleanly.**
+
+Load-bearing nuance: QQL3 was routed `ADAPTIVE_MKT` (per the driver's `order_type_by_symbol` map), so the *visible* 2161 cap never fired (`cap_binding_2161_count` 0, `mktCapPrice` 0.0) — yet QQL3 still did not fill, unlike the M2-IB.6.2c raw-MKT runs where 2161 fired visibly. **The non-fill is robust to the order-type mechanism**: the equity leg fails via the visible PMA cap (raw MKT) *and* via the Adaptive algo declining to cross within the wait. Two honest caveats, recorded not buried: (a) the capture's 10s `--event-wait-seconds` contributes to the Adaptive non-fill — a longer-resting live order could mean-revert into a fill — but the raw-MKT cap binds independent of time (M2-IB.6.2c's 60s wait was also 0/5) and the structural PMA constraint on leveraged ETPs for UK retail is established, so only the *exact* live fill-rate is open (it re-derives at M7 parity); (b) IBTL had no eligibility-driven orders in these windows, so the Treasury evidence is IBTM-only.
+
+### Decision
+
+**Resolve OQ-031 with Option 1: accept the leveraged-equity-leg non-fill as a real Phase-1 deployment characteristic — no code change — and defer the leveraged-leg redesign to Phase 2.**
+
+1. **Phase 1 deploys A3 as-is**, with the documented understanding that on this PMA-bound UK-retail account the QQL3 (3×) leg structurally ≈ never fills, so **live behaviour is Treasury-leg-dominated** (the strategy executes effectively as its 1× Treasury sleeve). Acceptable for Phase 1 because Phase 1's purpose is *execution-stack validation* — which the M2-IB → M3 ladder has substantially completed (FSM, SMART/LSEETF routing, sizing per ADR-050, tick-grid per ADR-051, RiskEngine, mixed-currency surface all wire-validated; the remaining M3.4–M3.6 items are P&L-reconciliation / chaos-drill / KB-STABLE work, not execution-correctness gaps) — **not** P&L generation on a paper account.
+
+2. **No amendment to ADR-043 / ADR-047 now, and no new RiskCheck or order-path code.** The QQL3 leg is *retained* for Phase 1 but flagged **provisional** (a `refined-by: ADR-052` backref is added to ADR-043 + ADR-047 frontmatter for discoverability): its non-fill is a known, documented execution property, not a defect.
+
+3. **The redesign that would restore the strategy's intended leveraged equity exposure is forward-listed to Phase 2 entry, captured as [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure).** Phase 1 surfaced a deeper constraint — a *trilemma*: a UK-retail **Cash** account has **no** open path to leveraged equity exposure. **PRIIPs/KID** blocks US-domiciled leveraged ETPs (ADR-047); the **PMA cap (2161)** blocks UK-listed leveraged ETPs (ADR-049 / this ADR); a **Cash** account blocks margin-financed leverage. OQ-032 carries the *full* design space — including the **leverage-preserving** path (≈3× via 3:1 margin on a plain 1× Nasdaq-100 UCITS ETF, whose ~1–1.5% daily range very likely does not trip the volatility-triggered PMA cap; per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) blive already supports margin-financed leverage) **alongside** de-levering to 1×/1×, Pro-Client classification, a mean-reversion restructure, and an archetype swap. The M3→M4 boundary is the natural home for this strategy-identity decision, where the M7 parity re-derivation informs it.
+
+4. **Live-cutover posture:** before any real-money cutover (M8, well beyond G4) the operator monitors the QQL3 fill-rate empirically; if the Treasury-dominated profile is unacceptable for live, the Phase-2 redesign (OQ-032) supersedes this acceptance. Options 2 (Pro Client) and 4 (passive-limit-only) remain available re-entry points but are not chosen now.
+
+### Alternatives Considered
+
+1. **Option 3 — substitute the leveraged leg now** (UK-listed 1× UCITS Nasdaq analogue → 1×/1×). The 0% fill is the strongest argument for it, and it is the only OQ-031 option that makes the strategy trade both legs — but it *drops* the leverage. **Deferred, not rejected:** it changes strategy identity (amends ADR-043 + ADR-047) and costs a universe re-validation half-session. Deferred into [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure), which carries the *broader* design space — including the **leverage-preserving** margin-on-1×-UCITS path that none of the four OQ-031 options captured (the omission this ADR's review corrected).
+2. **Option 2 — MiFID II Professional Client classification** (enables `priceManagementOff`, so QQL3 itself fills — a leverage-*preserving* path). Declined at M2-IB.6.1; the M3.2 data does not move the wealth / experience / transaction-frequency thresholds. Re-entry point preserved via OQ-032.
+3. **Option 4 — passive-limit-only restructure** (embrace the cap as a mean-reversion model; keeps the leveraged ETP but changes the strategy's character). Largest pivot from the A3 trend-following intent; needs a fresh ADR + re-derived parity envelope. The data does not point here — the equity leg's non-fill is a constraint to design around, not evidence the strategy *should* mean-revert.
+
+### Consequences
+
+- **Positive:** M3 gets an auditable, data-grounded deployment-mode commitment (data → Option 1 → why) with **no code change / no regression risk** — G3-IB-A3 and all M2-IB wire validations stand unchanged.
+- **Positive:** the strategy-identity decision lands at the phase boundary where it belongs, informed by the M7 parity re-derivation, not rushed into a Phase-1-close edit; OQ-032 preserves the *full* design space (incl. the leverage-preserving margin path) so the Phase-2 decision is not pre-narrowed toward de-levering.
+- **Negative / honest:** the Phase 1 *strategy as deployed* is materially not the intended 3×/1× trend-follower — it is a 1× Treasury sleeve in practice. Acceptable only under "Phase 1 = validate the engine"; explicitly **not** a real-money endorsement of A3-as-is.
+- **Negative / risk:** if a future change makes the equity leg fill (account / venue change), live behaviour shifts toward the 3× profile without re-validation; mitigated because OQ-032 owns the redesign and any such change routes through it.
+- **Follow-ups:**
+  - Open [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — Phase 2 A3 leveraged-leg redesign (full design space; target Phase 2 entry / M4).
+  - Flip OQ-031 OPEN → RESOLVED-BY-ADR-052 (status field only; body untouched, append-only).
+  - Add `refined-by: ADR-052` to ADR-043 + ADR-047 frontmatter (discoverability; the QQL3 leg is now provisional).
+  - TASK_REGISTRY M3.3 marked resolved; G4 exit-criterion #1 satisfied. No INV-14 / INV-4 / code change.
+
+### Cross-References
+
+- [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — resolved by this ADR (Option 1).
+- [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — the deferred Phase-2 redesign this ADR forward-lists (carries the leverage-preserving margin path).
+- [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) — the empirical PMA-cap finding this operationalises into a deployment decision.
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) / [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — the A3 strategy + PRIIPs universe whose QQL3 leg is retained-but-provisional for Phase 1.
+- [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) — blive supports margin-financed leverage (the basis for OQ-032's leverage-preserving path).
+- [INV-14 v0.9](../inv/ib_error_codes.md) — warning 2161 (PMA cap) + error-110 rows.
+- M3.2 capture: `~/.blive/data/m3_2_window/runs.jsonl` (two flip-spanning runs, 2026-06-05) — the empirical basis.
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2530,3 +2601,4 @@ Generalising: the minimum price increment is (a) **per-contract**, (b) sometimes
 - **v0.20 (2026-05-06 / M3.1 entry)** — Added ADR-050 (EODHD-vs-IB unit-of-quote conversion at sizing time — Hybrid B-now / A-later free-MD-only) **PROPOSED**. Operationalises the M3.1 narrow-scope sizing fix per [TASK_REGISTRY M3.1](../../TASK_REGISTRY.md): Route B (per-instrument convention catalogue at `src/blive/adapters/eodhd/conventions.py`) ships now; Route A (live-IB-MD reference for sizing) reserved for M7 but **bounded to free IB market-data tiers only** (operator-stated cost discipline; LSEETF and other paid subscriptions out of scope indefinitely). The 2026-05-06 EODHD-side investigation (`scripts/probe_qql3_unit_of_quote.py`) refuted the `adjusted_close` and currency-convention hypotheses; the operative cause is a recent reverse-split that EODHD has not yet propagated. Catalogue v0.1 entry for QQL3: `MANUAL_SCALE(divisor=10.0, source="IB live reference, M2-IB.6.2c")`. Companion edits in same M3.1 commit batch: RC-10 (price sanity, ±50% threshold) implemented in `blive.risk` per [INV-4 v0.2](../inv/risk_checks.md); KB-15 (`parity_methodology`) MISSING → DRAFT v0.1 (unit-of-quote / reverse-split section only); INV-14 grows the error 110 row promotion; DD-7 footnote on the QQL3 reverse-split convention; pipeline `_price_lookup` closure routes through the conventions catalogue. Status PROPOSED until the M3.1 wire-validation run produces a QQL3 sized within ±1% of the IB-USD-equivalent target exposure with no IB error 110; flips to ACCEPTED in the wire-validation commit per the established same-day-ACCEPTED pattern.
 - **v0.21 (2026-06-05 / M3.1b)** — Added ADR-051 (Normalize IB order prices to the contract tick grid at submit time) **PROPOSED**. The 2026-06-05 M3.1 wire-validation run (`--order-type LMT --max-bars 5`, LSE RTH) confirmed ADR-050's unit-of-quote fix (QQL3 sized 65 sh @ ~$39 vs the pre-fix 6 sh @ ~$381) but surfaced a *second, independent* cause of IB error 110: tick-size non-conformance (QQL3's LSEETF minimum price variation is 0.10; blive's pipeline hardcoded `quantize(0.01)`, so 38.52 / 42.83 / 44.15 were rejected while 39.60 / 41.50 passed). ADR-051 moves price-grid conformance to the broker's `submit()` chokepoint: a pure `snap_price` (`blive.adapters.shared.price_grid`) + an IB increment-table source/cache (`blive.adapters.ib.price_rules` — market rule with `minTick` fallback, per-`Instrument` cache + `clear_cache`); the pipeline's `quantize(0.01)` is removed. Magnitude (ADR-050) stays at sizing time, grid (ADR-051) at submit time — distinct layers by design. Because ADR-050's flip criterion also requires "no error 110", ADR-050 + ADR-051 now flip PROPOSED → ACCEPTED **jointly** on the first clean LMT wire run. Companion edits in this batch: INV-14 error 110 row (two sub-causes), DD-7 (per-contract tick / market-rule metadata), TASK_REGISTRY M3.1 → M3.1b, CONTEXT_INVENTORY banner. Size/lot conformance noted as the same-seam forward-extension (not built). All ADRs ACCEPTED as of v0.21 **except** ADR-050 + ADR-051 (PROPOSED; joint wire-flip pending) and ADR-021 (SUPERSEDED-BY-ADR-043).
 - **v0.22 (2026-06-05 / M3.1b wire-validation)** — ADR-050 + ADR-051 flipped PROPOSED → ACCEPTED **jointly** on the clean LSE-RTH wire run (`run_m2ib6_ib_paper.py --order-type LMT --max-bars 5`, 2026-06-05 11:38 BST). QQL3 limits snapped to its 0.10 LSEETF tick grid on the *live* wire (`38.519640 → 38.5`, `39.600015 → 39.6`, `41.500470 → 41.5`, `42.830085 → 42.8`, `44.152665 → 44.2`) and placed with **zero IB error 110** (6 submitted, 0 rejected; IBTM filled). QQL3 reaches ACCEPTED → CANCELED cleanly — the residual no-fill is the structural 2161 PMA-cap / resting-LMT behaviour tracked in [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) (M3.2/M3.3), not a tick or magnitude issue. Both ADR bodies unchanged (append-only); status fields + index rows flipped with the date trail. **All ADRs ACCEPTED as of v0.22 except ADR-021 (SUPERSEDED-BY-ADR-043).**
+- **v0.23 (2026-06-05 / M3.3 OQ-031 resolution)** — Added **ADR-052** (Phase 1 accepts the PMA-bound leveraged-leg non-fill — OQ-031 Option 1) ACCEPTED (drafted PROPOSED then ACCEPTED same-session on operator confirm). Resolves [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on the M3.2 empirical capture (QQL3 0/69 fills = 0% vs IBTM 6/6 = 100%; 2161 cap-binding 0; zero rejects / breaches / error-110 across two flip-spanning LSE-RTH runs): Phase 1 deploys A3 accepting the 3× leveraged equity leg ≈ never fills (live behaviour Treasury-leg-dominated), **no code change**; the leveraged-leg redesign is deferred to Phase 2 as [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure). OQ-032 carries the *full* design space — including the **leverage-preserving** margin-on-a-1×-UCITS path (≈3× via 3:1 margin on a low-volatility 1× Nasdaq-100 UCITS that likely dodges the volatility-triggered PMA cap, per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments)) that the four OQ-031 options had omitted — the honest scope is a *trilemma* (PRIIPs blocks US leveraged ETPs, PMA blocks UK ones, Cash blocks margin-leverage). Companion edits (append-only / frontmatter-only): OQ-031 status OPEN → RESOLVED-BY-ADR-052; OQ-032 raised; `refined-by: ADR-052` backref added to ADR-043 + ADR-047 frontmatter (the QQL3 leg is now provisional — a new backref convention, the discoverability mirror of the supersede-chain); TASK_REGISTRY M3.3 resolved + G4 exit-criterion #1 satisfied; CONTEXT_INVENTORY §10 + banner. No code / INV-14 / INV-4 change (Option 1 = no code change); tests unchanged at 590. **All ADRs ACCEPTED as of v0.23 except ADR-021 (SUPERSEDED-BY-ADR-043).**
