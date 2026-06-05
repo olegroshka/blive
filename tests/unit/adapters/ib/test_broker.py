@@ -545,6 +545,59 @@ async def test_account_snapshot_filters_other_account_pushes(
     assert snapshot.equity == Decimal("100000.00")  # not overwritten
 
 
+async def test_account_snapshot_mixed_currency_reads_base_total(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Mixed-currency account: equity is the consolidated BASE total, not the
+    base-currency sleeve (M3.4 finding, 2026-06-05 live IB DUP886336).
+
+    IB reports ``NetLiquidationByCurrency`` for the base-currency *sleeve*
+    (GBP-denominated holdings only) AND a "BASE" aggregate (the whole account).
+    Reading the GBP sleeve (£902,839) silently dropped the USD cash (~£101k)
+    vs the true total (£1,003,886). ``base_currency`` is inferred from the unit
+    ``ExchangeRate`` row, not by comparing unconverted cross-currency magnitudes.
+    """
+    initial = [
+        # NetLiquidation: GBP sleeve, USD sleeve, and the BASE consolidated total.
+        _ib_account_value(tag="NetLiquidationByCurrency", value="1003885.69", currency="BASE"),
+        _ib_account_value(tag="NetLiquidationByCurrency", value="902839.13", currency="GBP"),
+        _ib_account_value(tag="NetLiquidationByCurrency", value="134724.51", currency="USD"),
+        # Cash per currency (the "BASE" aggregate row is excluded from cash_by_ccy).
+        _ib_account_value(tag="TotalCashBalance", value="1003620.33", currency="BASE"),
+        _ib_account_value(tag="TotalCashBalance", value="902573.77", currency="GBP"),
+        _ib_account_value(tag="TotalCashBalance", value="134724.51", currency="USD"),
+        # ExchangeRate: the base currency reports a unit rate; others are FX rates.
+        _ib_account_value(tag="ExchangeRate", value="1.00", currency="GBP"),
+        _ib_account_value(tag="ExchangeRate", value="0.7449588", currency="USD"),
+        # Base-only aggregates (no "BASE" row — only the base-currency sleeve).
+        _ib_account_value(tag="BuyingPower", value="4014481.32", currency="GBP"),
+        _ib_account_value(tag="GrossPositionValue", value="0.00", currency="GBP"),
+        _ib_account_value(tag="MaintMarginReq", value="0.00", currency="GBP"),
+    ]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+
+    snapshot = await broker.account_snapshot()
+
+    # base currency from the unit ExchangeRate row, not the largest magnitude
+    # (the GBP sleeve happens to be larger here, but the signal is authoritative).
+    assert snapshot.base_currency == "GBP"
+    # equity is the BASE total (£1,003,886), NOT the GBP sleeve (£902,839).
+    assert snapshot.equity == Decimal("1003885.69")
+    # base-only aggregates fall through to the GBP sleeve correctly.
+    assert snapshot.buying_power == Decimal("4014481.32")
+    assert snapshot.gross_exposure == Decimal("0.00")
+    assert snapshot.margin_used == Decimal("0.00")
+    # cash_by_ccy carries both sleeves (the "BASE" aggregate row is excluded).
+    assert snapshot.cash_by_ccy == {
+        "GBP": Decimal("902573.77"),
+        "USD": Decimal("134724.51"),
+    }
+
+
 async def test_account_snapshot_requires_connect(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,

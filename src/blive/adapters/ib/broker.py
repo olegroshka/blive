@@ -134,6 +134,7 @@ _TAG_TOTAL_CASH = "TotalCashBalance"
 _TAG_BUYING_POWER = "BuyingPower"
 _TAG_GROSS_POSITION = "GrossPositionValue"
 _TAG_MAINT_MARGIN = "MaintMarginReq"
+_TAG_EXCHANGE_RATE = "ExchangeRate"
 
 
 # Per-field thresholds for the AccountUpdate diff-suppress timer per
@@ -1209,21 +1210,31 @@ class IBBroker:
         # currency, or via per-currency rows.
         base_currency = self._infer_base_currency()
 
+        # Aggregate fields read the explicit "BASE" pseudo-currency row (the
+        # consolidated total across currencies, already in base-currency units)
+        # PRIMARY, falling back to the base-currency sleeve. In a mixed-currency
+        # account ``NetLiquidationByCurrency`` carries BOTH a per-currency sleeve
+        # (e.g. GBP = the GBP-denominated holdings) AND a "BASE" aggregate (the
+        # whole account); reading the sleeve understates equity by the non-base
+        # sleeves — the M3.4 finding (2026-06-05: GBP sleeve £902,839 vs BASE
+        # total £1,003,886, the ~£101k USD cash dropped). The base-only tags
+        # (BuyingPower / GrossPositionValue / MaintMarginReq) have no "BASE" row,
+        # so they correctly fall through to the base-currency sleeve.
         equity = self._account_value_decimal(
-            (base_currency, _TAG_NET_LIQUIDATION),
-            fallback_keys=[("BASE", _TAG_NET_LIQUIDATION)],
+            ("BASE", _TAG_NET_LIQUIDATION),
+            fallback_keys=[(base_currency, _TAG_NET_LIQUIDATION)],
         )
         buying_power = self._account_value_decimal(
-            (base_currency, _TAG_BUYING_POWER),
-            fallback_keys=[("BASE", _TAG_BUYING_POWER)],
+            ("BASE", _TAG_BUYING_POWER),
+            fallback_keys=[(base_currency, _TAG_BUYING_POWER)],
         )
         gross_exposure = self._account_value_decimal(
-            (base_currency, _TAG_GROSS_POSITION),
-            fallback_keys=[("BASE", _TAG_GROSS_POSITION)],
+            ("BASE", _TAG_GROSS_POSITION),
+            fallback_keys=[(base_currency, _TAG_GROSS_POSITION)],
         )
         margin_used = self._account_value_decimal(
-            (base_currency, _TAG_MAINT_MARGIN),
-            fallback_keys=[("BASE", _TAG_MAINT_MARGIN)],
+            ("BASE", _TAG_MAINT_MARGIN),
+            fallback_keys=[(base_currency, _TAG_MAINT_MARGIN)],
         )
 
         # cash_by_ccy: per-currency TotalCashBalance rows (excludes the
@@ -1275,9 +1286,23 @@ class IBBroker:
             if tag == "AccountCurrency" and value:
                 return value
 
-        # 2. The non-BASE currency with a NetLiquidation row. For a
-        # single-currency account there's only one; for multi-currency the
-        # account base is ambiguous and we pick the highest-equity row.
+        # 2. The non-"BASE" currency whose ExchangeRate is exactly 1.0 — IB
+        # reports a unit rate only for the account's base currency, so this is
+        # an authoritative signal (unlike step 3's raw-magnitude heuristic,
+        # which compares unconverted cross-currency NetLiq values and is right
+        # only when the base sleeve happens to be the largest). M3.4 hardening.
+        for (ccy, tag), value in self._account_values.items():
+            if tag != _TAG_EXCHANGE_RATE or not ccy or ccy == "BASE":
+                continue
+            try:
+                if Decimal(value) == Decimal("1"):
+                    return ccy
+            except (ValueError, ArithmeticError):
+                continue
+
+        # 3. The non-BASE currency with the largest NetLiquidation row. For a
+        # single-currency account there's only one; for multi-currency without
+        # an ExchangeRate signal this is a best-effort heuristic.
         best_ccy = ""
         best_equity = Decimal("-Infinity")
         for (ccy, tag), value in self._account_values.items():
@@ -1295,7 +1320,7 @@ class IBBroker:
         if best_ccy:
             return best_ccy
 
-        # 3. Fallback: USD (most common IB account currency).
+        # 4. Fallback: USD (most common IB account currency).
         return "USD"
 
     def _account_value_decimal(
