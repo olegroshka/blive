@@ -4,7 +4,7 @@ title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
 last_reviewed: 2026-06-05
-version: 0.23
+version: 0.24
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -80,6 +80,7 @@ referenced_by:
 | [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) | EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only) | ACCEPTED | 2026-05-06 | — |
 | [ADR-051](#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time) | Normalize IB order prices to the contract tick grid at submit time | ACCEPTED | 2026-06-05 | — |
 | [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) | Phase 1 accepts the PMA-bound leveraged-leg non-fill (OQ-031 Option 1) | ACCEPTED | 2026-06-05 | OQ-031 |
+| [ADR-053](#adr-053--upgrade-to-python-312) | Upgrade to Python 3.12 | ACCEPTED | 2026-06-05 | — |
 
 ---
 
@@ -2577,6 +2578,53 @@ Load-bearing nuance: QQL3 was routed `ADAPTIVE_MKT` (per the driver's `order_typ
 
 ---
 
+## ADR-053 — Upgrade to Python 3.12
+
+- **status:** ACCEPTED (operator-authorised 2026-06-05; `.venv` recreated on 3.12.12 with all gates green — 591 tests, mypy --strict, black, isort, lint-imports)
+- **date:** 2026-06-05
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (the "Python 3.11.x exactly" baseline lived in CLAUDE.md + pyproject, never a formal ADR; this ADR establishes the version policy)
+- **companion:** btest `fd106f9` (requires-python relax) + `32dab28` (remove unused/broken `signum`); [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) (the Phase-2 strategy that motivated it)
+
+### Context
+
+blive — and its editable sibling `quantdsl-backtest` (btest) — pinned **Python 3.11.x exactly** as a bootstrap choice. Phase 2's incoming strategy (the VIX-term-structure backtest in `lab/research/r_lev_001_triple_leveraged_etf`, which feeds [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)) requires **Python 3.12**. Since blive imports btest editable, both must move together.
+
+A non-destructive 3.12 resolution + install + dual-suite dry-run (2026-06-05) proved feasibility: every C-extension dep has 3.12 wheels (numba 0.65.1, vectorbt 1.0.0, arcticdb 6.18.0), **blive's 591 tests and btest's 317 unit tests pass on 3.12**, and the only snags were tooling-side (not 3.12): btest's `requires-python` pin, an unused-but-broken `signum` optional dep, pandas over-reaching to the breaking 3.0 major, and mypy floating to 2.x (1 new finding). The current env was *already* on the modern majors (numpy 2.4, pandas 2.3, numba 0.65, vectorbt 1.0), so 3.12 is "same deps, newer interpreter".
+
+### Decision
+
+**Adopt Python 3.12** (the latest *viable* — see alternatives).
+
+1. **`requires-python = ">=3.11"`** in blive + btest (allow 3.11 *and* 3.12 through the transition; don't strand anyone on 3.11). `[tool.mypy] python_version = "3.12"`; `[tool.black] target-version = ["py312"]`.
+2. **Pin `pandas>=2.0,<3.0`.** pandas 3.0 is a breaking major (Copy-on-Write default, etc.); isolate the interpreter change from a dataframe-semantics change. numpy stays 2.x (already there).
+3. **Adopt mypy 2.x, pinned `==2.1.0`** (like black/isort — the type gate's output must be reproducible). The one new 2.x finding — `float()` on a `Series`-typed scalar access in `ib_pipeline.py` — is fixed with a `cast` (the runtime value is a scalar). Chosen over pinning `mypy<2`, to keep the type checker current.
+4. **btest: removed the unused/broken `signum`** core dep (research-only charting, try/except-guarded, never imported in `src`/tests; its git repo publishes mismatched `signum-charts` metadata that breaks `uv`). It blocked the 3.12 resolve (btest `32dab28`).
+5. **Recreated `.venv` on 3.12** (`uv venv --python 3.12` + `uv sync --extra dev`); `uv.lock` re-locked. All gates green.
+
+### Alternatives Considered
+
+1. **Stay on 3.11.** Rejected — Phase 2's strategy needs 3.12; deferring just moves the work.
+2. **Go to the latest (3.13 / 3.14).** Rejected — `numba` / `vectorbt` / `arcticdb` lag newer CPython; 3.12 is the latest version btest's heavy dep tree installs on. 3.13+ is a future step once those catch up.
+3. **Pin `mypy<2`** (zero code change). Rejected — the one finding is a legitimate 1-line typing fix; keeping mypy current is worth more.
+4. **Let pandas float to 3.0.** Rejected for *this* change — it couples the interpreter upgrade to a breaking dataframe major; pin `<3` and revisit pandas 3.0 on its own.
+
+### Consequences
+
+- **Positive:** blive + btest run on 3.12; Phase 2's 3.12-only strategy is unblocked; the dep tree is modern + 3.12-wheeled.
+- **Positive:** the formatter + type gates are now all version-pinned (black 26.3.1, isort 8.0.1, mypy 2.1.0) — the gate is fully reproducible (the lesson from the M2-IG-era black drift).
+- **Negative / deferred:** pandas 3.0 and Python 3.13/3.14 are deliberately deferred (separate steps, when deps catch up). `signum` research charts must be installed manually (corrected name `signum-charts`).
+- **Negative / risk:** `requires-python >=3.11` still allows 3.11 — acceptable during the transition; tighten to `>=3.12` once 3.11 is retired.
+- **Follow-ups:** revisit pandas 3.0 + Python 3.13 when numba/vectorbt support them; consider `requires-python >=3.12` later.
+
+### Cross-References
+
+- btest `fd106f9` (requires-python >=3.11) + `32dab28` (remove signum) — the sibling-repo half.
+- [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — the Phase-2 strategy redesign whose VIX/TQQQ/VXX notebook needs 3.12.
+- `pyproject.toml` (requires-python / mypy / black / pandas / mypy pins); `uv.lock` (re-locked for 3.12); `src/blive/runtime/ib_pipeline.py` (the mypy 2.x cast fix); `CLAUDE.md` (toolchain line).
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2602,3 +2650,4 @@ Load-bearing nuance: QQL3 was routed `ADAPTIVE_MKT` (per the driver's `order_typ
 - **v0.21 (2026-06-05 / M3.1b)** — Added ADR-051 (Normalize IB order prices to the contract tick grid at submit time) **PROPOSED**. The 2026-06-05 M3.1 wire-validation run (`--order-type LMT --max-bars 5`, LSE RTH) confirmed ADR-050's unit-of-quote fix (QQL3 sized 65 sh @ ~$39 vs the pre-fix 6 sh @ ~$381) but surfaced a *second, independent* cause of IB error 110: tick-size non-conformance (QQL3's LSEETF minimum price variation is 0.10; blive's pipeline hardcoded `quantize(0.01)`, so 38.52 / 42.83 / 44.15 were rejected while 39.60 / 41.50 passed). ADR-051 moves price-grid conformance to the broker's `submit()` chokepoint: a pure `snap_price` (`blive.adapters.shared.price_grid`) + an IB increment-table source/cache (`blive.adapters.ib.price_rules` — market rule with `minTick` fallback, per-`Instrument` cache + `clear_cache`); the pipeline's `quantize(0.01)` is removed. Magnitude (ADR-050) stays at sizing time, grid (ADR-051) at submit time — distinct layers by design. Because ADR-050's flip criterion also requires "no error 110", ADR-050 + ADR-051 now flip PROPOSED → ACCEPTED **jointly** on the first clean LMT wire run. Companion edits in this batch: INV-14 error 110 row (two sub-causes), DD-7 (per-contract tick / market-rule metadata), TASK_REGISTRY M3.1 → M3.1b, CONTEXT_INVENTORY banner. Size/lot conformance noted as the same-seam forward-extension (not built). All ADRs ACCEPTED as of v0.21 **except** ADR-050 + ADR-051 (PROPOSED; joint wire-flip pending) and ADR-021 (SUPERSEDED-BY-ADR-043).
 - **v0.22 (2026-06-05 / M3.1b wire-validation)** — ADR-050 + ADR-051 flipped PROPOSED → ACCEPTED **jointly** on the clean LSE-RTH wire run (`run_m2ib6_ib_paper.py --order-type LMT --max-bars 5`, 2026-06-05 11:38 BST). QQL3 limits snapped to its 0.10 LSEETF tick grid on the *live* wire (`38.519640 → 38.5`, `39.600015 → 39.6`, `41.500470 → 41.5`, `42.830085 → 42.8`, `44.152665 → 44.2`) and placed with **zero IB error 110** (6 submitted, 0 rejected; IBTM filled). QQL3 reaches ACCEPTED → CANCELED cleanly — the residual no-fill is the structural 2161 PMA-cap / resting-LMT behaviour tracked in [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) (M3.2/M3.3), not a tick or magnitude issue. Both ADR bodies unchanged (append-only); status fields + index rows flipped with the date trail. **All ADRs ACCEPTED as of v0.22 except ADR-021 (SUPERSEDED-BY-ADR-043).**
 - **v0.23 (2026-06-05 / M3.3 OQ-031 resolution)** — Added **ADR-052** (Phase 1 accepts the PMA-bound leveraged-leg non-fill — OQ-031 Option 1) ACCEPTED (drafted PROPOSED then ACCEPTED same-session on operator confirm). Resolves [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on the M3.2 empirical capture (QQL3 0/69 fills = 0% vs IBTM 6/6 = 100%; 2161 cap-binding 0; zero rejects / breaches / error-110 across two flip-spanning LSE-RTH runs): Phase 1 deploys A3 accepting the 3× leveraged equity leg ≈ never fills (live behaviour Treasury-leg-dominated), **no code change**; the leveraged-leg redesign is deferred to Phase 2 as [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure). OQ-032 carries the *full* design space — including the **leverage-preserving** margin-on-a-1×-UCITS path (≈3× via 3:1 margin on a low-volatility 1× Nasdaq-100 UCITS that likely dodges the volatility-triggered PMA cap, per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments)) that the four OQ-031 options had omitted — the honest scope is a *trilemma* (PRIIPs blocks US leveraged ETPs, PMA blocks UK ones, Cash blocks margin-leverage). Companion edits (append-only / frontmatter-only): OQ-031 status OPEN → RESOLVED-BY-ADR-052; OQ-032 raised; `refined-by: ADR-052` backref added to ADR-043 + ADR-047 frontmatter (the QQL3 leg is now provisional — a new backref convention, the discoverability mirror of the supersede-chain); TASK_REGISTRY M3.3 resolved + G4 exit-criterion #1 satisfied; CONTEXT_INVENTORY §10 + banner. No code / INV-14 / INV-4 change (Option 1 = no code change); tests unchanged at 590. **All ADRs ACCEPTED as of v0.23 except ADR-021 (SUPERSEDED-BY-ADR-043).**
+- **v0.24 (2026-06-05 / Python 3.12 upgrade)** — Added **ADR-053** (Upgrade to Python 3.12) ACCEPTED. Standalone tooling change (not a milestone deliverable): blive + btest move from "Python 3.11.x exactly" to **3.12** (`requires-python >=3.11`, `mypy python_version 3.12`, `black target py312`), motivated by Phase 2's VIX-term-structure strategy (the `r_lev_001` notebook / OQ-032) which needs 3.12. A non-destructive dry-run validated the full dep tree on 3.12 (numba 0.65.1 / vectorbt 1.0.0 / arcticdb 6.18.0 all have 3.12 wheels; blive 591 + btest 317 tests pass). Companion changes: `pandas` pinned `<3` (avoid the breaking 3.0 major); mypy bumped to 2.x pinned `==2.1.0` (the one new finding — `float(Series)` in `ib_pipeline.py` — fixed with a `cast`); btest's unused/broken `signum` optional dep removed (commits `fd106f9` + `32dab28`). `.venv` recreated on 3.12.12; `uv.lock` re-locked; all gates green. **All ADRs ACCEPTED as of v0.24 except ADR-021 (SUPERSEDED-BY-ADR-043).**

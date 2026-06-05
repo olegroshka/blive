@@ -46,7 +46,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Mapping
+from typing import Mapping, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -473,7 +473,11 @@ async def run_ib_multi_pipeline(
         target_weights: dict[str, Decimal] = {}
         for inst in instruments:
             if inst.symbol in weights_row.index:
-                target_weights[inst.symbol] = Decimal(str(float(weights_row[inst.symbol])))
+                # cast: pandas-stubs types Series element access as Any | Series,
+                # but a scalar-label lookup is a scalar at runtime (mypy 2.x, ADR-053).
+                target_weights[inst.symbol] = Decimal(
+                    str(float(cast(float, weights_row[inst.symbol])))
+                )
             else:
                 target_weights[inst.symbol] = Decimal("0")
 
