@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -250,6 +251,16 @@ class IBBroker:
         # rejection path (see :meth:`_on_order_status`); entries are popped
         # on terminal-event emission to bound memory.
         self._error_by_order_id: dict[int, tuple[int, str]] = {}
+        # Histogram of order-related IB error/warning codes observed on
+        # ``ib.errorEvent`` over this broker's lifetime, keyed by code. Read
+        # via the :attr:`observed_error_codes` snapshot. M3.2 reads this to
+        # count warning 2161 (PMA disruptive-orders price-cap — the OQ-031
+        # fill-rate signal) without log-scraping; the histogram also feeds
+        # M3.5's INV-14 catalogue-extension work. Counts every push with
+        # ``reqId > 0`` (order-related); connection-level events (reqId <= 0)
+        # are excluded symmetrically with the stash above. See INV-14 v0.9 /
+        # INV-8 ``cap_binding_2161_count``.
+        self._observed_error_codes: Counter[int] = Counter()
         # Cached handler reference for ``ib.errorEvent`` subscription —
         # symmetric with :attr:`_account_value_handler` so disconnect can
         # detach via ``-=``.
@@ -265,6 +276,20 @@ class IBBroker:
         the broker. Engine-side reconciliation (M5) translates between
         this broker-level view and per-strategy views."""
         return f"ib_{self._client.credentials.account_id}"
+
+    @property
+    def observed_error_codes(self) -> dict[int, int]:
+        """Snapshot of order-related IB error/warning codes seen so far,
+        keyed by code → occurrence count.
+
+        Populated by :meth:`_on_ib_error` for every ``ib.errorEvent`` push
+        with ``reqId > 0``. The pipeline reads this at end-of-run to record
+        warning 2161 (PMA price-cap) occurrences in
+        :class:`blive.runtime.ib_pipeline.IBMultiRunResult` — the M3.2 /
+        OQ-031 cap-binding signal. Returns a copy; mutating it does not
+        affect the broker's internal counter.
+        """
+        return dict(self._observed_error_codes)
 
     # --- BrokerPort: connect / disconnect -----------------------------------
 
@@ -968,6 +993,7 @@ class IBBroker:
         """
         if reqId <= 0:
             return
+        self._observed_error_codes[int(errorCode)] += 1
         self._error_by_order_id[int(reqId)] = (int(errorCode), errorString or "")
 
     async def _emit_rejected_via_inactive(

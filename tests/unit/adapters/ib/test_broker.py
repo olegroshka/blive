@@ -1059,6 +1059,36 @@ async def test_error_event_ignores_connection_level_reqid(
     assert broker._error_by_order_id == {}  # noqa: SLF001
 
 
+async def test_observed_error_codes_tallies_order_level_pushes(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """M3.2 / OQ-031: the broker tallies order-related error/warning codes
+    (reqId > 0) into observed_error_codes so the empirical-window results
+    sink can count warning 2161 (PMA cap) without log-scraping. Two 2161
+    pushes on distinct orders + one 110 are counted; connection-level
+    events (reqId <= 0) are excluded, symmetric with the rejection stash."""
+    mock_ib = _make_mock_ib()
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+
+    mock_ib.errorEvent.emit(101, 2161, "PMA cap: BUY 5 QQL3 LSEETF ...", None)
+    mock_ib.errorEvent.emit(102, 2161, "PMA cap: BUY 5 QQL3 LSEETF ...", None)
+    mock_ib.errorEvent.emit(103, 110, "The price does not conform ...", None)
+    mock_ib.errorEvent.emit(-1, 2104, "Market data farm connection is OK", None)
+    await asyncio.sleep(0)
+
+    codes = broker.observed_error_codes
+    assert codes[2161] == 2
+    assert codes[110] == 1
+    assert 2104 not in codes  # reqId <= 0 excluded
+
+    # The accessor returns a copy — mutating it doesn't touch the broker.
+    codes[2161] = 99
+    assert broker.observed_error_codes[2161] == 2
+
+
 async def test_submit_emits_rejected_when_cancelled_with_error_code_in_log(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,
