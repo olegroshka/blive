@@ -38,8 +38,12 @@ dev = [
   "pytest-mock>=3.12",
   "hypothesis>=6.100",
   "mypy>=1.10",
-  "black>=24.0",
-  "isort>=5.13",
+  # Formatters pinned exactly: their output is the gate, so it must be
+  # deterministic across environments/time. (A floor let the env drift to a
+  # newer black whose blank-line rule reformatted M2-IG-era files — caught at
+  # M3.3. Bump deliberately: change the pin, then re-run black/isort.)
+  "black==26.3.1",
+  "isort==8.0.1",
   "import-linter>=2.0",
   "types-pyyaml>=6.0",
   "pandas-stubs>=2.0",
