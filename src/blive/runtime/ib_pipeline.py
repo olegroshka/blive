@@ -655,6 +655,11 @@ def _ib_order_from_desired(
             limit_price = ib_reference * (Decimal("1") + scale)
         else:
             limit_price = ib_reference * (Decimal("1") - scale)
+        # No tick-grid rounding here (ADR-051): the pipeline emits the
+        # economically-intended limit; IBBroker.submit snaps it to the
+        # contract's legal price grid at the wire boundary. (Pre-ADR-051
+        # this quantized to 0.01, which tripped IB error 110 on QQL3's
+        # 0.10 tick.)
         return Order(
             client_order_id=ClientOrderId(uuid4()),
             strategy_id=base.strategy_id,
@@ -663,7 +668,7 @@ def _ib_order_from_desired(
             quantity=base.quantity,
             order_type=OrderType.LMT,
             time_in_force=TimeInForce.DAY,
-            limit_price=limit_price.quantize(Decimal("0.01")),
+            limit_price=limit_price,
             stop_price=None,
             parent_id=None,
             tags={**base.tags, "pipeline": "m2-ib.5"},

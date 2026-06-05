@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Sequence
 from unittest.mock import AsyncMock, MagicMock
 
 import eventkit
@@ -32,6 +33,7 @@ from blive.adapters.ib.broker import IBBroker, IBShapeError
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.credentials import IBCredentials
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
+from blive.adapters.shared.price_grid import PriceIncrement
 from blive.adapters.shared.rate_limiter import (
     RateLimitBucket,
     RateLimitConfig,
@@ -40,6 +42,7 @@ from blive.adapters.shared.rate_limiter import (
 from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.types import (
     AssetClass,
+    Instrument,
     Order,
     OrderEventKind,
     OrderSide,
@@ -127,6 +130,15 @@ def _make_mock_ib(
     return m
 
 
+class _StubPriceRules:
+    """Permissive ADR-051 price-grid provider for the broker suite: a 0.01
+    grid leaves the on-grid test limit prices unchanged. Tick-snapping
+    itself is exercised in ``test_broker_tick_grid.py``."""
+
+    async def increments_for(self, instrument: Instrument) -> Sequence[PriceIncrement]:
+        return (PriceIncrement(Decimal("0"), Decimal("0.01")),)
+
+
 def _make_broker(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,
@@ -135,7 +147,7 @@ def _make_broker(
 ) -> IBBroker:
     client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock, ib=mock_ib)
     resolver = IBInstrumentResolver(client)
-    return IBBroker(client=client, resolver=resolver, clock=clock)
+    return IBBroker(client=client, resolver=resolver, clock=clock, price_rules=_StubPriceRules())
 
 
 def _ib_account_value(

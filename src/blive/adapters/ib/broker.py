@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, AsyncIterator
@@ -60,6 +60,12 @@ import ib_async
 
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
+from blive.adapters.ib.price_rules import (
+    IBPriceRuleService,
+    PriceIncrementProvider,
+    PriceRuleUnavailable,
+)
+from blive.adapters.shared.price_grid import RoundingPolicy, snap_price
 from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
@@ -199,11 +205,22 @@ class IBBroker:
         resolver: IBInstrumentResolver,
         clock: ClockPort,
         account_update_interval_seconds: float = 30.0,
+        price_rules: PriceIncrementProvider | None = None,
+        rounding_policy: RoundingPolicy = RoundingPolicy.NEAREST,
     ) -> None:
         self._client = client
         self._resolver = resolver
         self._clock = clock
         self._account_update_interval_seconds = account_update_interval_seconds
+        # ADR-051: snap priced orders to the contract tick grid at submit
+        # time. Default-construct the IB source/cache from the shared client
+        # + resolver; tests inject a fake provider.
+        self._price_rules: PriceIncrementProvider = (
+            price_rules
+            if price_rules is not None
+            else IBPriceRuleService(client=client, resolver=resolver)
+        )
+        self._rounding_policy = rounding_policy
         self._connected = False
         self._events: asyncio.Queue[BrokerEvent] = asyncio.Queue()
         # Latest accumulated AccountValue tuples, keyed by (currency, tag).
@@ -474,6 +491,24 @@ class IBBroker:
                 f"error since the FSM is in SUBMITTED+ already."
             )
 
+        # ADR-051: render the order's priced fields onto the contract's
+        # legal tick grid before it reaches the wire. A grid we can't
+        # determine is a blive-side REJECT (don't ship a price IB would
+        # bounce with error 110); the order never reaches placeOrder.
+        try:
+            order = await self._snap_order_prices(order)
+        except PriceRuleUnavailable as exc:
+            await self._events.put(
+                OrderEvent(
+                    client_order_id=client_order_id,
+                    venue_order_id=None,
+                    kind=OrderEventKind.REJECTED,
+                    reason=f"blive:price-rule-unavailable {exc}",
+                    time_utc=self._clock.now(),
+                )
+            )
+            return client_order_id
+
         contract = self._resolver.to_contract(order.instrument)
         ib_order = _blive_to_ib_order(order)
         # Stamp the client_order_id into the IB orderRef so reconciliation
@@ -557,6 +592,44 @@ class IBBroker:
             "strategy doesn't modify in-flight orders; cancel-then-new "
             "wrapper deferred until a strategy needs it."
         )
+
+    # --- Internals: price-grid conformance (ADR-051) ------------------------
+
+    async def _snap_order_prices(self, order: Order) -> Order:
+        """Snap an order's priced fields to the contract tick grid (ADR-051).
+
+        MKT / ADAPTIVE_MKT orders (no price) pass through untouched. For
+        priced orders, fetch the contract's increment table (cached) and
+        snap ``limit_price`` / ``stop_price`` per the broker's
+        :class:`RoundingPolicy`. Returns ``order`` unchanged when nothing
+        moved; propagates :class:`PriceRuleUnavailable` from the provider
+        when the grid can't be determined — :meth:`submit` turns that into
+        a REJECT.
+        """
+        if order.limit_price is None and order.stop_price is None:
+            return order
+        increments = await self._price_rules.increments_for(order.instrument)
+        new_limit = (
+            snap_price(order.limit_price, increments, side=order.side, policy=self._rounding_policy)
+            if order.limit_price is not None
+            else None
+        )
+        new_stop = (
+            snap_price(order.stop_price, increments, side=order.side, policy=self._rounding_policy)
+            if order.stop_price is not None
+            else None
+        )
+        if new_limit == order.limit_price and new_stop == order.stop_price:
+            return order
+        log.info(
+            "IBBroker snapped %s prices to tick grid (ADR-051): " "limit %s -> %s, stop %s -> %s",
+            order.instrument.symbol,
+            order.limit_price,
+            new_limit,
+            order.stop_price,
+            new_stop,
+        )
+        return replace(order, limit_price=new_limit, stop_price=new_stop)
 
     # --- Internals: per-trade order-event handlers --------------------------
 
