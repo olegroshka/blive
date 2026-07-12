@@ -71,6 +71,13 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
     "BATS": "BATS",
     "XLON": "LSE",
     "XETR": "IBIS",
+    # EU single-name venues for the R05 dividend book (Nordics + Iberia + Amsterdam). IB exchange
+    # codes are best-known; qualifyContractsAsync validates each on first resolve (a wrong code → 0
+    # candidates → InstrumentNotResolvable, never a silent mis-route).
+    "XOSL": "OSE",    # Oslo Børs (Euronext Oslo) — most of R05 (FRO/DNO/BWO/SUBC/AKRBP/…)
+    "XCSE": "CPH",    # Nasdaq Copenhagen (TRMD-A)
+    "XMAD": "BM",     # Bolsa de Madrid / BME (REP)
+    "XAMS": "AEB",    # Euronext Amsterdam (KENDR)
 }
 
 
@@ -262,7 +269,7 @@ class IBInstrumentResolver:
         # actual multiplier value for OPT / FUT.
         multiplier_str = "" if instrument.multiplier == Decimal("1") else str(instrument.multiplier)
 
-        return ib_async.Contract(
+        contract = ib_async.Contract(
             symbol=_ib_symbol(instrument),
             secType=sec_type,
             currency=instrument.currency,
@@ -270,6 +277,15 @@ class IBInstrumentResolver:
             primaryExchange=primary_exchange,
             multiplier=multiplier_str,
         )
+        if getattr(instrument, "isin", None):
+            # Resolve by ISIN (secIdType/secId) — robust for cross-border EU listings where the IB wire
+            # symbol differs from the EODHD/Yahoo ticker (BP.LSE, TRMD-A.CO both failed by symbol). IB
+            # qualifies on ISIN + exchange + currency; clear the symbol hint so a stale ticker can't
+            # conflict with the ISIN match.
+            contract.secIdType = "ISIN"
+            contract.secId = instrument.isin
+            contract.symbol = ""
+        return contract
 
     async def resolve(self, instrument: Instrument) -> int:
         """Return the IB ``conId`` for the given instrument.

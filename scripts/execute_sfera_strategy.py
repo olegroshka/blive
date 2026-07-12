@@ -57,6 +57,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -128,6 +129,56 @@ _CATALOGUE: dict[str, Instrument] = {
 
 _NON_TRADABLE = {"CASH"}  # residual sleeve — never an order
 
+# --- EU single-name equities (R05 dividend book): EODHD "TICKER.EXCH" -> IB Instrument ON DEMAND ------
+# The static _CATALOGUE above is US ETFs. R05 holds EU stocks in LOCAL ccys, and its Top-15 composition
+# rotates monthly — so rather than hardcode names, we build each Instrument from its EODHD ticker: the
+# exchange suffix maps to a MIC venue (the IB resolver turns MIC -> IB exchange) + the venue's default ccy.
+_EODHD_EU_EXCH: dict[str, tuple[str, str]] = {
+    "OL":    ("XOSL", "NOK"),   # Oslo Børs
+    "CO":    ("XCSE", "DKK"),   # Nasdaq Copenhagen
+    "MC":    ("XMAD", "EUR"),   # Bolsa de Madrid
+    "AS":    ("XAMS", "EUR"),   # Euronext Amsterdam
+    "PA":    ("XPAR", "EUR"),   # Euronext Paris
+    "XETRA": ("XETR", "EUR"),   # Xetra
+    "LSE":   ("XLON", "GBP"),   # London main book (quoted GBX pence; IB contract ccy is GBP)
+    "SW":    ("XSWX", "CHF"),   # SIX Swiss (future R05 names)
+    "ST":    ("XSTO", "SEK"),   # Stockholm
+    "HE":    ("XHEL", "EUR"),   # Helsinki
+}
+
+
+def _ensure_eu_instruments(symbols, sfera_root=None) -> None:
+    """Register EU single-name equities in _CATALOGUE from eodhd.instruments: 'TICKER.EXCH' -> Instrument
+    (bare ticker, MIC venue, ISIN + IB currency, EQUITY). Resolution is BY ISIN (robust vs guessing the IB
+    wire symbol). Records each symbol's EODHD price currency in _PRICE_CCY (e.g. GBX pence) for price->USD."""
+    todo = [s for s in symbols if s not in _CATALOGUE and s not in _NON_TRADABLE and "." in s
+            and s.rpartition(".")[2] in _EODHD_EU_EXCH]
+    if not todo:
+        return
+    meta: dict[str, tuple] = {}
+    try:
+        import psycopg
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+            for s in todo:
+                tk, _, ex = s.rpartition(".")
+                cur.execute("SELECT isin, currency FROM eodhd.instruments "
+                            "WHERE ticker=%s AND exchange_code=%s LIMIT 1", (tk, ex))
+                r = cur.fetchone()
+                if r:
+                    meta[s] = (r[0], r[1])
+    except Exception:  # noqa: BLE001 - fall back to venue-default ccy, no ISIN (symbol resolution)
+        pass
+    for s in todo:
+        tk, _, ex = s.rpartition(".")
+        mic, default_ccy = _EODHD_EU_EXCH[ex]
+        isin, eod_ccy = meta.get(s, (None, None))
+        price_ccy = (eod_ccy or default_ccy or "EUR").upper()   # EODHD price currency (may be GBX = pence)
+        _PRICE_CCY[s] = price_ccy
+        ib_ccy = "GBP" if price_ccy == "GBX" else price_ccy     # IB contract ccy (GBX is not valid on the wire)
+        _CATALOGUE[s] = Instrument(symbol=tk, venue=mic, currency=ib_ccy, isin=(isin or None),
+                                   asset_class=AssetClass.EQUITY, multiplier=Decimal("1"),
+                                   tradability="spot")
+
 # --- Canonical strategy registry --------------------------------------------
 # Naming convention (per operator):
 #   * R-code (R01, R02, ...) = the research/strategy identity that lab + sfera
@@ -147,6 +198,7 @@ _STRATEGIES: dict[str, dict] = {
     "R02": {"db_key": "r_lev_002", "slot": "S14",   "name": "Conditional rotation (qc_cash)",       "status": "live"},
     "R03": {"db_key": "r_lev_003", "slot": None,    "name": "Keeper (rotation + vol/chop overlays)", "status": "candidate"},
     "R04": {"db_key": "r_lev_004", "slot": "S14v2", "name": "Sized rotation (+iv9M/COT)",            "status": "candidate"},
+    "R05": {"db_key": "eu_div_income", "slot": None, "name": "EU dividend income (treaty-0%, EU stocks)", "status": "candidate"},
 }
 _SLOT_TO_RCODE = {v["slot"]: k for k, v in _STRATEGIES.items() if v["slot"]}
 _LEGACY_TO_RCODE = {v["db_key"]: k for k, v in _STRATEGIES.items()}
@@ -163,6 +215,63 @@ def _resolve_code(token: str) -> tuple[str, str]:
         rc = _LEGACY_TO_RCODE[token]
         return rc, _STRATEGIES[rc]["db_key"]
     raise WeightLoadError(f"unknown strategy {token!r}")
+
+
+# --- Single-instance run lock (prevents concurrent double-fire) --------------
+_LOCK_PATH = Path.home() / ".blive" / "execute.lock"
+_LOCK_STALE_SEC = 600  # a lock older than this = a crashed run; overridable
+
+
+def _acquire_run_lock() -> bool:
+    """Acquire the submit-path lock so two executor runs can't double-fire (e.g.
+    the GUI button AND run_daily --execute, or a double-click). Returns False if
+    a fresh lock is already held. FS errors never block execution."""
+    try:
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _LOCK_PATH.exists() and (time.time() - _LOCK_PATH.stat().st_mtime) < _LOCK_STALE_SEC:
+            return False
+        _LOCK_PATH.write_text(f"{os.getpid()} {datetime.now(tz=timezone.utc).isoformat()}")
+        return True
+    except Exception:  # noqa: BLE001 - never block execution on a lock FS error
+        return True
+
+
+def _release_run_lock() -> None:
+    try:
+        _LOCK_PATH.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# --- Once-per-day execution guard (per account) ------------------------------
+_EXEC_STATE_PATH = Path.home() / ".blive" / "last_execution.json"
+
+
+def _executed_today(account: str) -> str | None:
+    """Return the recorded time if this account already SUBMITTED today, else None."""
+    try:
+        rec = json.loads(_EXEC_STATE_PATH.read_text()).get(account)
+        if rec and rec.get("date") == date.today().isoformat():
+            return rec.get("time", "earlier today")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _record_execution(account: str, plan: str) -> None:
+    try:
+        _EXEC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _EXEC_STATE_PATH.exists():
+            try:
+                data = json.loads(_EXEC_STATE_PATH.read_text())
+            except Exception:  # noqa: BLE001
+                data = {}
+        data[account] = {"date": date.today().isoformat(), "plan": plan,
+                         "time": datetime.now(tz=timezone.utc).isoformat()}
+        _EXEC_STATE_PATH.write_text(json.dumps(data, indent=2))
+    except Exception:  # noqa: BLE001
+        pass
 
 _DEFAULT_SFERA_ROOT = Path(
     r"C:\Personal\Business & Investments\Python codes\sfera"
@@ -229,7 +338,8 @@ def load_weights_db(
 
     sql = (
         "SELECT date, identifier, weight FROM strategy.target_weights "
-        "WHERE strategy = %s" + (" AND date = %s" if as_of else "") + " ORDER BY identifier"
+        "WHERE strategy = %s AND deprecated_at IS NULL"      # active SCD2 version only (skip superseded)
+        + (" AND date = %s" if as_of else "") + " ORDER BY identifier"
     )
     params: tuple = (strategy, as_of) if as_of else (strategy,)
     try:
@@ -237,7 +347,8 @@ def load_weights_db(
             with conn.cursor() as cur:
                 if not as_of:
                     cur.execute(
-                        "SELECT MAX(date) FROM strategy.target_weights WHERE strategy = %s",
+                        "SELECT MAX(date) FROM strategy.target_weights "
+                        "WHERE strategy = %s AND deprecated_at IS NULL",
                         (strategy,),
                     )
                     latest = cur.fetchone()[0]
@@ -313,40 +424,130 @@ def _print_weights(weights: dict[str, Decimal], as_of: date, source: str) -> tup
     return tradable, cash_residual
 
 
+def _order_summary_rows(target_weights, prices, positions, orders, sym_origin, *, limit_band, is_limit):
+    """Per-symbol rows for the structured orders table the GUI renders (strategy, side, qty, limit, notional).
+    Orders carry the IB Instrument (BARE symbol, e.g. 'AKAST') — map it back to the EODHD identifier
+    ('AKAST.OL') so every row keys on the SAME id as target_weights/prices/sym_origin (no bare-vs-dotted
+    duplicate rows, and the strategy code from sym_origin lands on the right row)."""
+    id_by_inst = {v: k for k, v in _CATALOGUE.items()}
+    order_by_id = {id_by_inst.get(o.instrument, o.instrument.symbol): o for o in orders}
+    rows = []
+    for s in sorted(set(target_weights) | set(positions) | set(order_by_id)):
+        w = float(target_weights.get(s, 0) or 0)
+        px = float(prices.get(s, 0) or 0)                # LOCAL ccy close — the order/limit UNIT (NOK/DKK/GBX/…)
+        pccy = _PRICE_CCY.get(s, "USD")
+        usd_px = px * _usd_per_unit(pccy)                # per-leg FX -> USD (cached from sizing) for the NOTIONAL
+        pos = float(positions[s].quantity) if s in positions else 0.0
+        o = order_by_id.get(s)
+        if o is None and abs(w) < 1e-9 and abs(pos) < 1e-9:
+            continue                                     # skip pure-zero universe-fill rows (no order, no hold)
+        if o is not None:
+            side = str(o.side.value).upper()
+            qty = float(o.quantity)
+            lim = (px * (1 + limit_band) if side == "BUY" else px * (1 - limit_band)) if is_limit else None
+            notional = qty * usd_px                       # USD notional (local price × per-leg FX)
+        else:
+            side = "HOLD" if pos else "FLAT"
+            qty, lim, notional = 0.0, None, pos * usd_px
+        rows.append({
+            "strategy": "+".join(sym_origin.get(s, [])) or "—",
+            "symbol": s, "weight": round(w, 4), "position": round(pos, 2),
+            "price": round(px, 4), "price_ccy": pccy,     # local price + its ccy (limit is in this unit)
+            "side": side, "order_qty": round(qty, 2),
+            "limit_price": (round(lim, 4) if lim is not None else None),
+            "notional_usd": round(notional, 2),
+        })
+    return rows
+
+
+def _emit_orders_json(decision, reason, rows, **meta):
+    """Print a machine-readable orders block the GUI parses into a table (harmless noise in the CLI)."""
+    payload = {"decision": decision, "reason": reason, "rows": rows}
+    payload.update(meta)
+    print("\n===ORDERS_JSON===")
+    print(json.dumps(payload, default=str))
+    print("===END_ORDERS_JSON===")
+
+
 # --- Detect-at-connect + execution ------------------------------------------
 
 
-def _sfera_last_close(symbols: list[str], sfera_root: Path) -> dict[str, Decimal]:
-    """Fallback price source: latest close from sfera's ``yfmktdt.stock_prices``.
-
-    Used when IB market data is unavailable (error 162 session/market-data
-    contention, or no MD subscription) so sizing can still proceed — the MOO
-    fill happens at the next open regardless, so this is only a share-count
-    reference, never the execution price.
-    """
+def _pg_conn_str(sfera_root: Path | None = None) -> str:
+    """Postgres connection string for the shared sfera DB (env-driven)."""
     try:
-        import psycopg
         from dotenv import load_dotenv
-    except ImportError:  # pragma: no cover - environment dependent
-        return {}
-    env_path = Path(sfera_root) / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path)
-    conn_str = (
+        if sfera_root is not None:
+            ep = Path(sfera_root) / ".env"
+            if ep.is_file():
+                load_dotenv(ep)
+    except ImportError:  # pragma: no cover
+        pass
+    return (
         f"host={os.getenv('DB_HOST','localhost')} port={os.getenv('DB_PORT','5432')} "
         f"dbname={os.getenv('DB_NAME','sfera')} user={os.getenv('DB_USER','postgres')} "
         f"password={os.getenv('DB_PASSWORD','')}"
     )
+
+
+# per-symbol EODHD price currency (e.g. GBX for LSE pence) — used to convert the sfera EOD close to USD.
+_PRICE_CCY: dict[str, str] = {}
+_FX_CACHE: dict[str, float] = {}
+
+
+def _usd_per_unit(ccy: str, sfera_root: Path | None = None) -> float:
+    """USD value of 1 unit of ``ccy`` from ``yfmktdt.fx_rates`` (USD-anchored legs). USD→1.0; GBX→GBP/100
+    (LSE pence). Cached per process."""
+    c = (ccy or "USD").upper()
+    if c == "USD":
+        return 1.0
+    if c in _FX_CACHE:
+        return _FX_CACHE[c]
+    if c == "GBX":                                       # London pence -> pounds -> USD
+        val = _usd_per_unit("GBP", sfera_root) / 100.0
+        _FX_CACHE[c] = val
+        return val
+    val = 1.0
+    try:
+        import psycopg
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("SELECT rate FROM yfmktdt.fx_rates WHERE pair=%s AND deprecated_at IS NULL "
+                        "ORDER BY trade_date DESC LIMIT 1", (c + "USD",))
+            r = cur.fetchone()
+            if r and r[0]:
+                val = float(r[0])                        # XXXUSD leg: rate = USD per 1 unit
+            else:
+                cur.execute("SELECT rate FROM yfmktdt.fx_rates WHERE pair=%s AND deprecated_at IS NULL "
+                            "ORDER BY trade_date DESC LIMIT 1", ("USD" + c,))
+                r = cur.fetchone()
+                if r and r[0]:
+                    val = 1.0 / float(r[0])              # USDXXX leg: rate = units per USD -> invert
+    except Exception:  # noqa: BLE001
+        pass
+    _FX_CACHE[c] = val
+    return val
+
+
+def _sfera_last_close(symbols: list[str], sfera_root: Path) -> dict[str, Decimal]:
+    """Latest EOD close from sfera (LOCAL ccy). US tickers → ``yfmktdt.stock_prices``; EU 'TICKER.EXCH'
+    → ``eodhd.prices`` by (ticker, exchange). Used when IB market data isn't permitted (EU venues) so
+    sizing + limit bands can still proceed off yesterday's close — never the execution price itself.
+    """
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover
+        return {}
     out: dict[str, Decimal] = {}
     try:
-        with psycopg.connect(conn_str, connect_timeout=5) as conn:
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 for sym in symbols:
-                    cur.execute(
-                        "SELECT close_price FROM yfmktdt.stock_prices WHERE ticker=%s "
-                        "ORDER BY trade_date DESC LIMIT 1",
-                        (sym,),
-                    )
+                    if "." in sym:                       # EU single-name: eodhd.prices (local ccy)
+                        tk, _, ex = sym.rpartition(".")
+                        cur.execute("SELECT close_price FROM eodhd.prices WHERE ticker=%s AND exchange=%s "
+                                    "AND deprecated_at IS NULL ORDER BY trade_date DESC LIMIT 1", (tk, ex))
+                    else:                                # US: yfmktdt.stock_prices
+                        cur.execute("SELECT close_price FROM yfmktdt.stock_prices WHERE ticker=%s "
+                                    "ORDER BY trade_date DESC LIMIT 1", (sym,))
                     row = cur.fetchone()
                     if row and row[0] is not None:
                         out[sym] = Decimal(str(float(row[0])))
@@ -392,6 +593,13 @@ async def _probe_eligibility_and_price(
     start = end - timedelta(days=7)
     need_fallback: list[str] = []
     for sym in eligible:
+        # EU single-name equities: this account has no IB market-data permission for those venues, so an
+        # IB historical_bars call just eats a ~15s timeout before failing. Skip IB entirely and price them
+        # off sfera's eodhd EOD close (yesterday) — markets are closed anyway; the close is the right
+        # reference for sizing + limit bands, and the fill happens at the next open.
+        if sym in _PRICE_CCY:
+            need_fallback.append(sym)
+            continue
         try:
             bars = await market_data.historical_bars(_CATALOGUE[sym], freq="1d", start=start, end=end)
             if bars:
@@ -406,7 +614,8 @@ async def _probe_eligibility_and_price(
         for sym, px in _sfera_last_close(need_fallback, sfera_root).items():
             prices[sym] = px
             price_src[sym] = "sfera-close"
-            last_bars[sym] = Bar(instrument=_CATALOGUE[sym], close_time_utc=end,
+            last_bars[sym] = Bar(instrument=_CATALOGUE[sym],
+                                 open_time_utc=end - timedelta(days=1), close_time_utc=end,
                                  open=px, high=px, low=px, close=px, volume=Decimal("0"))
     return prices, price_src, blocked, eligible, last_bars
 
@@ -466,6 +675,7 @@ async def _run(args: argparse.Namespace) -> int:
         try:
             plan = json.loads(args.portfolio)
             combined: dict[str, Decimal] = {}
+            sym_origin: dict[str, list[str]] = {}   # which strategy contributed each symbol (per-order attribution)
             total_budget = Decimal("0")
             oldest: date | None = None
             labels: list[str] = []
@@ -475,6 +685,8 @@ async def _run(args: argparse.Namespace) -> int:
                 w_i, d_i, _ = _load_one(dbk_i)
                 for sym, wt in w_i.items():
                     combined[sym] = combined.get(sym, Decimal("0")) + b * wt
+                    if wt != 0 and code_i not in sym_origin.get(sym, []):
+                        sym_origin.setdefault(sym, []).append(code_i)
                 total_budget += b
                 oldest = d_i if oldest is None else min(oldest, d_i)
                 labels.append(f"{code_i} {float(b):,.0f}")
@@ -507,7 +719,9 @@ async def _run(args: argparse.Namespace) -> int:
         except WeightLoadError as exc:
             print(f"\nFAILED: {exc}")
             return 2
+        sym_origin = {s: [code] for s in weights}   # single strategy -> every symbol attributes to it
 
+    _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
     tradable_targets, cash_residual = _print_weights(weights, signal_date, source)
     if not tradable_targets:
         print("\nNo tradable (catalogued) legs in today's target — fully CASH / out-of-universe.")
@@ -590,6 +804,18 @@ async def _run(args: argparse.Namespace) -> int:
     positions: dict[str, Position] = {p.instrument.symbol: p for p in ib_positions}
     print(f"  Open positions: {list(positions.keys()) or '(none)'}")
 
+    # PENDING orders too — fold into the effective current state so sizing
+    # validates against positions PLUS in-flight orders (else a not-yet-filled
+    # order is ignored and re-issued). BUY adds, SELL subtracts.
+    pending_orders = await broker.open_orders()
+    pending_net: dict[str, Decimal] = {}
+    for po in pending_orders:
+        signed = po.quantity if po.side == OrderSide.BUY else -po.quantity
+        pending_net[po.instrument.symbol] = pending_net.get(po.instrument.symbol, Decimal("0")) + signed
+    if pending_net:
+        print("  Pending orders (net qty): "
+              + ", ".join(f"{s} {float(q):+.0f}" for s, q in sorted(pending_net.items())))
+
     # Probe the union of today's tradable targets and any held catalogue legs
     # (held-but-not-target legs must be price-known so the sizer can flatten them).
     probe_syms = sorted(set(tradable_targets) | (set(positions) & set(_CATALOGUE)))
@@ -629,13 +855,42 @@ async def _run(args: argparse.Namespace) -> int:
 
     base_ccy = snap.base_currency or "USD"
     fx, fx_src = await _fx_base_to_usd(broker, base_ccy)
-    if args.budget and args.budget > 0:
+    bccy = str(getattr(args, "budget_ccy", "base")).lower()
+    sroot = Path(args.sfera_root)
+    _id_by_inst = {v: k for k, v in _CATALOGUE.items()}      # Instrument -> its EODHD identifier (prices key)
+
+    def _px_usd(sym: str) -> Decimal:
+        """A leg's price in USD via PER-LEG FX: local EOD close (in _PRICE_CCY[sym], incl. GBX pence) ×
+        USD-per-unit from yfmktdt.fx_rates. R05 is multi-ccy (NOK/DKK/EUR/GBP); US legs stay USD (×1)."""
+        pc = _PRICE_CCY.get(sym) or getattr(_CATALOGUE.get(sym, None), "currency", "USD")
+        return prices[sym] * Decimal(str(_usd_per_unit(pc, sroot)))
+
+    # HOLDINGS basis: size against the current market value of what you ALREADY HOLD (mark-to-market, USD).
+    size_basis = str(getattr(args, "size_basis", "budget")).lower()
+    held_mv_usd = sum((positions[s].quantity * _px_usd(s)                      # THIS strategy's own sleeve only
+                       for s in prices if s in positions and s in weights), Decimal("0"))
+    fx_applied = False    # does the pot->USD sizing multiply by FX? (per-leg prices are ALWAYS USD-normalised)
+    if size_basis == "holdings" and held_mv_usd > 0:
+        pot_base = held_mv_usd
+        pot_usd = held_mv_usd.quantize(Decimal("0.01"))          # holdings MV, per-leg FX already applied
+        pot_label = f"holdings MV ${float(pot_usd):,.0f} USD (mark-to-market, per-leg FX)"
+    elif args.budget and args.budget > 0:
         pot_base = Decimal(str(args.budget))
-        pot_label = f"budget {float(pot_base):,.0f} {base_ccy}"
+        if bccy == "usd":
+            pot_usd = pot_base.quantize(Decimal("0.01"))          # budget already USD
+            pot_label = f"budget ${float(pot_base):,.0f} USD (source-ccy)"
+        elif bccy == "base":
+            pot_usd = (pot_base * fx).quantize(Decimal("0.01")); fx_applied = True
+            pot_label = f"budget {float(pot_base):,.0f} {base_ccy} x FX {float(fx):.4f}"
+        else:                                                     # explicit budget ccy (e.g. EUR) via fx_rates
+            u = Decimal(str(_usd_per_unit(bccy.upper(), sroot)))
+            pot_usd = (pot_base * u).quantize(Decimal("0.01")); fx_applied = True
+            pot_label = f"budget {float(pot_base):,.0f} {bccy.upper()} x {float(u):.4f}->USD"
     else:
         pot_base = equity * Decimal(str(args.nav_slice))
+        pot_usd = (pot_base * fx).quantize(Decimal("0.01")); fx_applied = True
         pot_label = f"nav_slice {args.nav_slice:.1%} x {float(equity):,.0f} {base_ccy} = {float(pot_base):,.0f} {base_ccy}"
-    pot_usd = (pot_base * fx).quantize(Decimal("0.01"))
+        fx_applied = True
     # AUM model: budget = allocated AUM; weights deploy within it. Strategies may
     # LEVER beyond AUM (e.g. R04 COT washout -> leg weight up to 1.5x, BIL floored
     # at 0) so a weight can exceed 1.0. The pure sizer caps |weight| <= 1, so we
@@ -649,17 +904,23 @@ async def _run(args: argparse.Namespace) -> int:
         {k: (w / lev) for k, w in target_weights.items()} if lev > 1 else target_weights
     )
     lev_note = f";  leverage {float(lev):.2f}x (deploys > AUM on margin)" if lev > 1 else ""
+    fx_note = (f"FX {base_ccy}->USD {float(fx):.4f} [{fx_src}] APPLIED" if fx_applied
+               else f"FX {base_ccy}->USD {float(fx):.4f} [{fx_src}] — REF ONLY, NOT applied (pure USD sizing)")
     print(
-        f"\n=== Sizing ({pot_label};  FX {base_ccy}->USD {float(fx):.4f} [{fx_src}];  "
+        f"\n=== Sizing ({pot_label};  {fx_note};  "
         f"AUM ${float(pot_usd):,.2f}{lev_note}) ==="
     )
     sizer_in = SizerInput(
         target_weights=size_weights,
         equity=size_equity,
         nav_slice=Decimal("1"),
-        current_positions={s: positions[s] for s in positions if s in prices},
+        # ONLY this strategy's OWN sleeve: manage positions it actually targets (s in weights). On a SHARED
+        # paper account, a position outside this strategy's book (e.g. R02's TQQQ, R04's BIL when running R05)
+        # is INVISIBLE — never flattened. Each strategy sizes against ITS allocated AUM, not a % of the whole
+        # account (ForgeFolio model). Foreign holdings are left exactly as-is.
+        current_positions={s: positions[s] for s in positions if s in prices and s in weights},
         instrument_resolver=lambda sym: _CATALOGUE[sym],
-        price_lookup=lambda inst: prices[inst.symbol],
+        price_lookup=lambda inst: _px_usd(_id_by_inst.get(inst, inst.symbol)),   # USD (per-leg FX) for sizing
         strategy_id=code,
         now=datetime.now(tz=timezone.utc),
     )
@@ -670,12 +931,67 @@ async def _run(args: argparse.Namespace) -> int:
         await broker.disconnect()
         return 5
 
+    # Net each sized delta against in-flight pending orders: residual = what is
+    # still needed after what is already working. An order already covering the
+    # gap drops to zero. This is the "positions + pending" validation.
+    if pending_net:
+        import dataclasses
+        netted: list[Order] = []
+        for o in candidate_orders:
+            need = o.quantity if o.side == OrderSide.BUY else -o.quantity
+            rq = int(need - pending_net.get(o.instrument.symbol, Decimal("0")))
+            if rq == 0:
+                print(f"  = {o.instrument.symbol}: already covered by pending — no new order")
+                continue
+            side = OrderSide.BUY if rq > 0 else OrderSide.SELL
+            netted.append(dataclasses.replace(o, side=side, quantity=Decimal(abs(rq))))
+        candidate_orders = netted
+
+    # --- Buy-and-hold guard: allocated ONCE (USD), ride the positions; trade ONLY on a signal flip -------
+    # Each strategy sleeve allocates its USD AUM ONCE and then HOLDS (essentially one asset per sleeve). The
+    # sizer's job is "true the book back to target weights" — but BETWEEN signal changes that is spurious
+    # CROSS-SLEEVE churn: when one leg (e.g. TQQQ) outperforms, the re-marked combined book drifts off its
+    # blended weights and the sizer wants to sell the winner to top up the laggard. The strategies do NOT do
+    # that — they hold. So in holdings (USD buy-and-hold) mode, if the target ASSET SET is unchanged (no flip)
+    # we HOLD, full stop — no drift rebalance, no band. Sizing is pure USD holdings MV; FX is never applied
+    # here and is managed separately at the account level. (Asset-set proxy fits R02/R04, which rotate between
+    # distinct single assets — a same-asset-set, weight-only change is not treated as a flip.)
+    broker_label = getattr(broker, "name", None) or type(broker).__name__.replace("Broker", "") or "IB"
+    _emeta = dict(as_of=str(signal_date), source=source, account=credentials.account_id,
+                  broker=broker_label, base_ccy=base_ccy, mode=("submit" if args.submit else "dry-run"),
+                  order_type=args.order_type, limit_band=float(args.limit_band),
+                  aum_usd=float(pot_usd), fx_rate=float(fx), fx_applied=bool(fx_applied))
+    hold_mode = size_basis == "holdings" or (args.rebalance_band and args.rebalance_band > 0)
+    if hold_mode and candidate_orders:
+        target_assets = {s for s, w in target_weights.items() if w != 0}
+        held_assets = {s for s, p in positions.items() if p.quantity != 0}
+        if target_assets == held_assets:                          # no signal / asset-set change → HOLD
+            drift = max((abs(o.quantity * prices.get(_id_by_inst.get(o.instrument, o.instrument.symbol), Decimal("0")))
+                         for o in candidate_orders), default=Decimal("0"))
+            print("\n  HOLDING — buy-and-hold: USD AUM allocated once, positions ride the market.")
+            print(f"  No signal flip (asset set unchanged) -> NO rebalance. Largest would-be drift trade "
+                  f"${float(drift):,.0f} is NOT placed — only a signal flip trades.")
+            print("  (FX not applied to sizing — pure USD holdings MV; FX handled separately in the paper account.)")
+            _emit_orders_json("HOLD", "no signal flip (asset set unchanged)",
+                              _order_summary_rows(target_weights, prices, positions, [], sym_origin,
+                                                  limit_band=float(args.limit_band), is_limit=is_limit),
+                              drift_usd=float(drift), **_emeta)
+            await broker.disconnect()
+            return 0
+        print(f"\n  Signal flip: asset set {sorted(held_assets)} -> {sorted(target_assets)} — rebalancing to new target.")
+
     if not candidate_orders:
-        print("  No orders — already at target weights.")
+        print("  No orders — already at target (positions + pending).")
+        _emit_orders_json("NO_ORDERS", "already at target (positions + pending)",
+                          _order_summary_rows(target_weights, prices, positions, [], sym_origin,
+                                              limit_band=float(args.limit_band), is_limit=is_limit), **_emeta)
         await broker.disconnect()
         return 0
     for o in candidate_orders:
         print(f"  -> {o.side.value} {float(o.quantity):.0f} {o.instrument.symbol}")
+    _emit_orders_json("ORDERS", "signal flip / rebalance to target",
+                      _order_summary_rows(target_weights, prices, positions, candidate_orders, sym_origin,
+                                          limit_band=float(args.limit_band), is_limit=is_limit), **_emeta)
 
     # --- 5. Dry-run vs submit ------------------------------------------------
     if not args.submit:
@@ -688,19 +1004,6 @@ async def _run(args: argparse.Namespace) -> int:
               "or pass --force-stale to override.")
         await broker.disconnect()
         return 2
-
-    # Double-submit guard: a prior run may have queued MOO orders not yet filled
-    # (sizer compares to filled positions, not pending orders) — skip dupes.
-    pending = await broker.open_orders()
-    pending_syms = {p.instrument.symbol for p in pending}
-    dup = pending_syms & {o.instrument.symbol for o in candidate_orders}
-    if dup:
-        print(f"  NOTE: pending orders already exist for {sorted(dup)} — skipping to avoid duplicates.")
-        candidate_orders = [o for o in candidate_orders if o.instrument.symbol not in pending_syms]
-        if not candidate_orders:
-            print("  Nothing new to submit.")
-            await broker.disconnect()
-            return 0
 
     if not args.yes:
         prompt = (
@@ -730,23 +1033,91 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"  risk engine ON (price-sanity ±50%; kill-switch="
               f"{'ARMED — all orders blocked' if args.kill_switch else 'clear'})")
 
+    if not _acquire_run_lock():
+        print("\nFAILED: another execution appears to be in progress (run-lock held) — "
+              f"aborting to avoid duplicate orders. If stale, delete {_LOCK_PATH}.")
+        await broker.disconnect()
+        return 2
+
+    prev = _executed_today(credentials.account_id)
+    if prev and not args.force:
+        print(f"\nFAILED: account {credentials.account_id} already executed today ({prev}). "
+              "Re-running would re-trade the day's target — pass --force to override.")
+        _release_run_lock()
+        await broker.disconnect()
+        return 2
+
     print(f"\n=== Submitting {args.order_type} orders ===")
     filled = canceled = rejected = risk_blocked = 0
     now_utc = datetime.now(tz=timezone.utc)
+
+    # Capture IB's per-order error(s) so a REJECT/Cancel shows WHY (110 tick, 10311 direct-route, 201, …)
+    # instead of a bare "REJECTED". Cleared before each submit → only that order's errors are attributed.
+    _ib_errs: list[tuple[int, str]] = []
+    _BENIGN_CODES = {2100, 2103, 2104, 2105, 2106, 2107, 2108, 2110, 2119, 2150, 2158, 162, 366}
+    def _capture_err(reqId, errorCode, errorString, *rest):   # ib_async errorEvent handler
+        try:
+            _ib_errs.append((int(errorCode), str(errorString)))
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        client.ib.errorEvent += _capture_err   # noqa: SLF001 - script-level access
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Round a limit to the contract's minimum price variation (fixes IB error 110). EU venues use TIERED
+    # ticks (the increment grows with price), so plain minTick (the smallest tier) is wrong — we pull the
+    # market-rule increment table and round to the increment for THIS price's band. Cached per instrument.
+    _tickrule: dict = {}
+    async def _round_to_tick(instrument, price: Decimal) -> Decimal:
+        rule = _tickrule.get(instrument)
+        if rule is None:
+            rule = [(Decimal("0"), Decimal("0.01"))]                          # fallback
+            try:
+                cds = await client.ib.reqContractDetailsAsync(resolver.to_contract(instrument))  # noqa: SLF001
+                if cds:
+                    d = cds[0]
+                    incs = None
+                    rids = str(getattr(d, "marketRuleIds", "") or "")
+                    if rids:
+                        try:
+                            incs = await client.ib.reqMarketRuleAsync(int(rids.split(",")[0]))  # noqa: SLF001
+                        except Exception:  # noqa: BLE001
+                            incs = None
+                    if incs:
+                        rule = sorted((Decimal(str(x.lowEdge)), Decimal(str(x.increment))) for x in incs)
+                    elif getattr(d, "minTick", None):
+                        rule = [(Decimal("0"), Decimal(str(d.minTick)))]
+            except Exception:  # noqa: BLE001
+                pass
+            _tickrule[instrument] = rule
+        inc = rule[0][1]                                                      # increment for this price's tier
+        for low, i in rule:
+            if price >= low:
+                inc = i
+            else:
+                break
+        return (price / inc).quantize(Decimal("1")) * inc
+
     for desired in candidate_orders:
         lp: Decimal | None = None
         if is_limit:
-            ref = prices[desired.instrument.symbol]
+            ref = prices[_id_by_inst.get(desired.instrument, desired.instrument.symbol)]   # LOCAL ccy for the order
             mult = (Decimal("1") + band) if desired.side == OrderSide.BUY else (Decimal("1") - band)
-            lp = (ref * mult).quantize(Decimal("0.01"))
-        order = _make_order(desired, order_type=order_type, tif=tif, limit_price=lp, label=f"sfera-{code}")
+            lp = await _round_to_tick(desired.instrument, ref * mult)   # round to venue minTick (fixes IB error 110)
+        # OPG (opening-auction) tif is US-only — EU venues (Euronext/LSE/XETRA/BM/Copenhagen) reject it
+        # (IB-201). For EU single-name equities send a plain DAY limit instead; US ETFs keep the OPG tif.
+        _is_eu = _id_by_inst.get(desired.instrument, desired.instrument.symbol) in _PRICE_CCY
+        _tif = TimeInForce.DAY if (_is_eu and tif == TimeInForce.OPG) else tif
+        order = _make_order(desired, order_type=order_type, tif=_tif, limit_price=lp, label=f"sfera-{code}")
 
         if engine is not None:
+            _rid = _id_by_inst.get(desired.instrument, desired.instrument.symbol)   # EODHD id (bars/prices key)
             approved, breaches = engine.approve(
                 order,
-                inputs=RiskInputs(last_bar=last_bars.get(desired.instrument.symbol),
+                inputs=RiskInputs(last_bar=last_bars.get(_rid),
                                   is_market_open=True,
-                                  reference_price=prices.get(desired.instrument.symbol)),
+                                  reference_price=prices.get(_rid)),
                 now=now_utc)
             for b in breaches:
                 chk = b.check.value if hasattr(b.check, "value") else b.check
@@ -759,13 +1130,15 @@ async def _run(args: argparse.Namespace) -> int:
         px_str = f" @ {float(lp):.2f}" if lp is not None else ""
         print(f"  Submitting {order.side.value} {float(order.quantity):.0f} "
               f"{order.instrument.symbol} {args.order_type}{px_str} ...")
+        _ib_errs.clear()
         await broker.submit(order)
         terminal_state, _ = await _drain_order_lifecycle(
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
             timeout_s=args.event_wait_seconds,
         )
-        print(f"    -> {terminal_state}")
+        reason = "; ".join(f"IB-{c}: {m}" for c, m in _ib_errs if c not in _BENIGN_CODES)
+        print(f"    -> {terminal_state}" + (f"   [{reason}]" if reason else ""))
         state_name = getattr(terminal_state, "name", str(terminal_state))
         if state_name == "FILLED":
             filled += 1
@@ -774,6 +1147,9 @@ async def _run(args: argparse.Namespace) -> int:
         elif state_name == "REJECTED":
             rejected += 1
 
+    if filled or canceled or rejected:
+        _record_execution(credentials.account_id, code)
+    _release_run_lock()
     print(f"\n=== Done: filled={filled}  canceled={canceled}  rejected={rejected}  risk-blocked={risk_blocked} ===")
     await broker.disconnect()
     return 0
@@ -790,7 +1166,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--sfera-root", default=str(_DEFAULT_SFERA_ROOT), help="sfera root (for DB .env)")
     p.add_argument("--as-of", default="", help="weights date YYYY-MM-DD (default latest)")
     p.add_argument("--nav-slice", type=float, default=0.05, help="NAV slice fraction of equity (default 0.05) if --budget unset")
-    p.add_argument("--budget", type=float, default=0.0, help="absolute strategy budget in account base ccy (overrides --nav-slice)")
+    p.add_argument("--budget", type=float, default=0.0, help="absolute strategy budget (overrides --nav-slice); denominated per --budget-ccy")
+    p.add_argument("--budget-ccy", default="base",
+                   help="currency --budget is in: 'base' (account ccy, FX-converted to USD each run — default, back-compat), "
+                        "'usd' (fixed USD notional = source-ccy sizing), or an ISO ccy code (e.g. 'eur' for R05) "
+                        "converted to USD via yfmktdt.fx_rates")
+    p.add_argument("--size-basis", choices=["budget", "holdings"], default="budget",
+                   help="AUM basis: 'budget' (default — from --budget/--nav-slice) or 'holdings' (mark-to-market USD "
+                        "value of CURRENT positions → target=held, so unchanged weights yield NO orders and the sleeve "
+                        "rides the market; buy-and-hold. Pair with --rebalance-band. Falls back to budget if flat.)")
+    p.add_argument("--rebalance-band", type=float, default=0.0,
+                   help="fraction of AUM (e.g. 0.05). When >0, HOLD instead of rebalancing if the target asset set is "
+                        "unchanged AND the largest move is < band — trade only on a signal flip or a large cash sweep "
+                        "(buy-and-hold as backtested). 0 (default) = true up to exact target every run (back-compat).")
     p.add_argument("--max-staleness-days", type=int, default=4, help="refuse --submit if weights older than N days (default 4)")
     p.add_argument("--force-stale", action="store_true", help="override the staleness guard on --submit")
     p.add_argument("--order-type", choices=("MOO", "MKT", "LOO", "LMT"), default="MOO",
@@ -800,6 +1188,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--risk-checks", action="store_true",
                    help="run blive RiskEngine (RC-10 price sanity etc.) before each submit")
     p.add_argument("--kill-switch", action="store_true", help="arm RC-13 kill-switch — blocks ALL orders")
+    p.add_argument("--force", action="store_true", help="override the once-per-day execution guard")
     p.add_argument("--offline", action="store_true", help="no IB; print target preview only")
     p.add_argument("--submit", action="store_true", help="actually place orders (default dry-run)")
     p.add_argument("--yes", action="store_true", help="skip interactive submit confirmation")

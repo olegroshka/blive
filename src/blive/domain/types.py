@@ -132,6 +132,8 @@ class Instrument:
     asset_class: AssetClass
     multiplier: Decimal = Decimal("1")
     tradability: Tradability = "spot"
+    isin: str | None = None          # ISIN for direct contract resolution (secIdType=ISIN) — beats guessing
+                                     # a wire symbol for cross-border EU listings (BP.LSE, TRMD-A.CO, …)
 
     def __post_init__(self) -> None:
         if not self.symbol or self.symbol != self.symbol.strip() or " " in self.symbol:
