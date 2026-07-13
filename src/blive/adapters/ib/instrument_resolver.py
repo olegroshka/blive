@@ -74,7 +74,10 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
     # EU single-name venues for the R05 dividend book (Nordics + Iberia + Amsterdam). IB exchange
     # codes are best-known; qualifyContractsAsync validates each on first resolve (a wrong code → 0
     # candidates → InstrumentNotResolvable, never a silent mis-route).
-    "XOSL": "OSE",    # Oslo Børs (Euronext Oslo) — most of R05 (FRO/DNO/BWO/SUBC/AKRBP/…)
+    # IB has NO direct Oslo Børs (OSE) destination — Norwegian names route via OMXNO (confirmed by IB
+    # support; OSE → IB-460 "No trading permissions"). ISIN resolution + OMXNO finds the contract.
+    # "many but not all" OSE names are on OMXNO; a missing one → 0 candidates → InstrumentNotResolvable.
+    "XOSL": "OMXNO",  # Oslo Børs via OMXNO — most of R05 (FRO/DNO/BWO/SUBC/AKRBP/…)
     "XCSE": "CPH",    # Nasdaq Copenhagen (TRMD-A)
     "XMAD": "BM",     # Bolsa de Madrid / BME (REP)
     "XAMS": "AEB",    # Euronext Amsterdam (KENDR)

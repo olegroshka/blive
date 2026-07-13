@@ -964,7 +964,10 @@ async def _run(args: argparse.Namespace) -> int:
     hold_mode = size_basis == "holdings" or (args.rebalance_band and args.rebalance_band > 0)
     if hold_mode and candidate_orders:
         target_assets = {s for s, w in target_weights.items() if w != 0}
-        held_assets = {s for s, p in positions.items() if p.quantity != 0}
+        # Only THIS sleeve's holdings — filter `s in weights` exactly as the sizer's current_positions does
+        # (line ~921). Foreign positions on the shared account (R02's TQQQ / R04's BIL when running R05) must
+        # NOT count as "held", else target != held on every run -> the guard never fires -> phantom rebalance.
+        held_assets = {s for s, p in positions.items() if p.quantity != 0 and s in weights}
         if target_assets == held_assets:                          # no signal / asset-set change → HOLD
             drift = max((abs(o.quantity * prices.get(_id_by_inst.get(o.instrument, o.instrument.symbol), Decimal("0")))
                          for o in candidate_orders), default=Decimal("0"))
