@@ -804,17 +804,29 @@ async def _run(args: argparse.Namespace) -> int:
     positions: dict[str, Position] = {p.instrument.symbol: p for p in ib_positions}
     print(f"  Open positions: {list(positions.keys()) or '(none)'}")
 
-    # PENDING orders too — fold into the effective current state so sizing
-    # validates against positions PLUS in-flight orders (else a not-yet-filled
-    # order is ignored and re-issued). BUY adds, SELL subtracts.
-    pending_orders = await broker.open_orders()
-    pending_net: dict[str, Decimal] = {}
-    for po in pending_orders:
-        signed = po.quantity if po.side == OrderSide.BUY else -po.quantity
-        pending_net[po.instrument.symbol] = pending_net.get(po.instrument.symbol, Decimal("0")) + signed
+    # PENDING orders too — fold into the effective current state so sizing validates against positions
+    # PLUS in-flight orders (else a not-yet-filled order is ignored and re-issued). Key by IB *conId*,
+    # NOT the ticker string: IB names some contracts differently from our EODHD ticker (BP.LSE -> "BP.",
+    # TRMD-A.CO -> "TRMD.A"), so a symbol match silently misses them and DOUBLE-orders on a re-run. conId
+    # is the stable identity the resolver already resolves/caches to, so pending + candidates net on it.
+    await client.rate_limiter.acquire("global")                 # mirror broker.open_orders() throttle
+    pending_net: dict[int, Decimal] = {}
+    pending_disp: dict[int, str] = {}
+    for t in await client.ib.reqAllOpenOrdersAsync():           # raw IB trades carry conId; domain Order does not
+        if t is None or getattr(t, "contract", None) is None:
+            continue
+        conid = int(getattr(t.contract, "conId", 0) or 0)
+        if not conid:
+            continue
+        rem = getattr(t.orderStatus, "remaining", None)
+        qty = Decimal(str(rem if rem else (getattr(t.order, "totalQuantity", 0) or 0)))
+        signed = qty if str(getattr(t.order, "action", "")).upper() == "BUY" else -qty
+        pending_net[conid] = pending_net.get(conid, Decimal("0")) + signed
+        pending_disp[conid] = getattr(t.contract, "symbol", "") or str(conid)
     if pending_net:
         print("  Pending orders (net qty): "
-              + ", ".join(f"{s} {float(q):+.0f}" for s, q in sorted(pending_net.items())))
+              + ", ".join(f"{pending_disp[c]} {float(q):+.0f}"
+                          for c, q in sorted(pending_net.items(), key=lambda kv: pending_disp[kv[0]])))
 
     # Probe the union of today's tradable targets and any held catalogue legs
     # (held-but-not-target legs must be price-known so the sizer can flatten them).
@@ -938,8 +950,12 @@ async def _run(args: argparse.Namespace) -> int:
         import dataclasses
         netted: list[Order] = []
         for o in candidate_orders:
+            try:
+                conid = await resolver.resolve(o.instrument)   # cached from the eligibility probe — no extra IB call
+            except Exception:  # noqa: BLE001 - unresolved -> no pending offset, treat as fresh order
+                conid = 0
             need = o.quantity if o.side == OrderSide.BUY else -o.quantity
-            rq = int(need - pending_net.get(o.instrument.symbol, Decimal("0")))
+            rq = int(need - pending_net.get(conid, Decimal("0")))
             if rq == 0:
                 print(f"  = {o.instrument.symbol}: already covered by pending — no new order")
                 continue
