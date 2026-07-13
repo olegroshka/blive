@@ -691,6 +691,8 @@ async def _drain_order_lifecycle(
     broker: IBBroker,
     target_id: ClientOrderId,
     timeout_s: float,
+    settle_on_accepted: bool = False,
+    accepted_grace_s: float = 1.0,
 ) -> tuple[OrderState, OrderEvent | None]:
     """Pull events from the broker until ``target_id`` reaches a terminal state.
 
@@ -698,6 +700,13 @@ async def _drain_order_lifecycle(
     decided it. On timeout (terminal not reached within ``timeout_s``),
     returns the latest non-terminal state seen — the caller decides
     whether to cancel.
+
+    ``settle_on_accepted``: a LOO/DAY order queued for the open is acknowledged
+    (SUBMITTED/ACCEPTED) and then simply works until the auction — a terminal
+    state will NOT arrive within the submit window, so waiting the full
+    ``timeout_s`` per order is pure idle time. When set, once the order is
+    confirmed working we wait only ``accepted_grace_s`` more (to catch a
+    trailing reject) and return the working state instead of idling out.
 
     Reads :attr:`IBBroker._events` directly to avoid the async-generator
     cancellation hazard documented in ``scripts/probe_ib_submit.py``.
@@ -739,6 +748,10 @@ async def _drain_order_lifecycle(
         elif event.kind == OrderEventKind.EXPIRED:
             state = OrderState.EXPIRED
             break
+        if settle_on_accepted and state in (OrderState.SUBMITTED, OrderState.ACCEPTED):
+            # Order confirmed working (won't reach terminal until the auction/session) — wait only a
+            # short grace for a trailing reject, then return the working state instead of idling out.
+            deadline = min(deadline, asyncio.get_event_loop().time() + accepted_grace_s)
 
     assert state in TERMINAL_ORDER_STATES
     return state, fill_event

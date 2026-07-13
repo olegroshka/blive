@@ -1139,7 +1139,8 @@ async def _run(args: argparse.Namespace) -> int:
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
             timeout_s=args.event_wait_seconds,
-        )
+            settle_on_accepted=True,   # LOO/DAY: return once IB confirms the order working — don't idle for a
+        )                              # fill that can't happen until the open (was 30s x N orders = GUI timeout)
         reason = "; ".join(f"IB-{c}: {m}" for c, m in _ib_errs if c not in _BENIGN_CODES)
         print(f"    -> {terminal_state}" + (f"   [{reason}]" if reason else ""))
         state_name = getattr(terminal_state, "name", str(terminal_state))
@@ -1196,7 +1197,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--submit", action="store_true", help="actually place orders (default dry-run)")
     p.add_argument("--yes", action="store_true", help="skip interactive submit confirmation")
     p.add_argument("--example-equity", type=float, default=100_000.0, help="equity for --offline preview")
-    p.add_argument("--event-wait-seconds", type=float, default=30.0, help="per-order FSM drain timeout")
+    p.add_argument("--event-wait-seconds", type=float, default=5.0,
+                   help="per-order FSM drain HARD CAP (s). With settle_on_accepted the order returns as soon "
+                        "as IB confirms it working; this is only the ceiling for a stuck/unacknowledged order.")
     return p.parse_args(argv)
 
 
