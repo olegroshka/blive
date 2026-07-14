@@ -801,7 +801,25 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
     ib_positions = await broker.positions()
-    positions: dict[str, Position] = {p.instrument.symbol: p for p in ib_positions}
+    # Re-key held positions by OUR ticker via IB conId. IB reports EU holdings under its OWN symbols
+    # (AKAST.OL -> "AKAST", BP.LSE -> "BP.", TRMD-A.CO -> "TRMD.A") which DON'T match our target tickers,
+    # so a raw-symbol key makes the sizer think the book is unheld and DOUBLE-BUYS it. conId is the stable
+    # identity (the same one that opened the position), so each held leg maps back onto its target.
+    _sym_conid = {getattr(rp.contract, "symbol", ""): int(getattr(rp.contract, "conId", 0) or 0)
+                  for rp in client.ib.positions() if getattr(rp.contract, "conId", 0)}
+    _conid_ticker: dict[int, str] = {}
+    for _s in weights:
+        _inst = _CATALOGUE.get(_s)
+        if _inst is None:
+            continue
+        try:
+            _conid_ticker[await resolver.resolve(_inst)] = _s   # cached; the eligibility probe reuses it
+        except Exception:  # noqa: BLE001 - an unresolved leg just stays under its IB symbol
+            pass
+    positions: dict[str, Position] = {}
+    for p in ib_positions:
+        _cid = _sym_conid.get(p.instrument.symbol)
+        positions[(_conid_ticker.get(_cid) if _cid else None) or p.instrument.symbol] = p
     print(f"  Open positions: {list(positions.keys()) or '(none)'}")
 
     # PENDING orders too — fold into the effective current state so sizing validates against positions
